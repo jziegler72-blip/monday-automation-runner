@@ -422,7 +422,8 @@ export async function handler(event) {
   // ── monday.com GraphQL proxy (solves browser CORS) ───────────────────────
   // The builder calls POST /api/monday with { token, query, variables }
   // We forward it server-side where CORS doesn't apply.
-  if (path.endsWith("/monday") && method === "POST") {
+  // Path arrives as /monday or /api/monday depending on redirect config.
+  if ((path === "/monday" || path.endsWith("/monday")) && method === "POST") {
     try {
       const { token, query, variables } = JSON.parse(event.body || "{}");
       const useToken = token || process.env.MONDAY_TOKEN;
