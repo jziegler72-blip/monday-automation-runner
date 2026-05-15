@@ -168,24 +168,34 @@ function triggerMatches(trigger, ctx) {
 
 // ─── Condition evaluator ──────────────────────────────────────────────────────
 function evalCondition(node, ctx) {
-  const c   = node.config || {};
-  const val = ctx.itemStatus;
-  const num = parseFloat(val);
+  const c = node.config || {};
+
+  // Get the value to compare — prefer the specific column's live value if available
+  // Falls back to itemStatus (which is the webhook-triggered column's value)
+  const rawVal = (c.column && ctx.columnValues?.[c.column])
+    ? ctx.columnValues[c.column]
+    : ctx.itemStatus;
+
+  const val  = String(rawVal || "");
+  const num  = parseFloat(val);
   const cNum = parseFloat(c.value);
+
+  console.log(`Condition eval: column=${c.column} value="${val}" operator=${c.operator} compare="${c.value}"`);
+
   switch (c.operator) {
-    case "equals":              return val === c.value                          ? "yes" : "no";
-    case "not_equals":          return val !== c.value                          ? "yes" : "no";
-    case "contains":            return (val||"").includes(c.value)              ? "yes" : "no";
-    case "not_contains":        return !(val||"").includes(c.value)             ? "yes" : "no";
-    case "starts_with":         return (val||"").startsWith(c.value)           ? "yes" : "no";
-    case "greater_than":        return num > cNum                               ? "yes" : "no";
-    case "greater_than_or_equal": return num >= cNum                            ? "yes" : "no";
-    case "less_than":           return num < cNum                               ? "yes" : "no";
-    case "less_than_or_equal":  return num <= cNum                              ? "yes" : "no";
-    case "between":             return num >= cNum && num <= parseFloat(c.valueTo) ? "yes" : "no";
-    case "empty":               return !val                                     ? "yes" : "no";
-    case "not_empty":           return !!val                                    ? "yes" : "no";
-    default:                    return "yes";
+    case "equals":                return val === c.value                              ? "yes" : "no";
+    case "not_equals":            return val !== c.value                              ? "yes" : "no";
+    case "contains":              return val.includes(c.value)                        ? "yes" : "no";
+    case "not_contains":          return !val.includes(c.value)                       ? "yes" : "no";
+    case "starts_with":           return val.startsWith(c.value)                      ? "yes" : "no";
+    case "greater_than":          return num > cNum                                   ? "yes" : "no";
+    case "greater_than_or_equal": return num >= cNum                                  ? "yes" : "no";
+    case "less_than":             return num < cNum                                   ? "yes" : "no";
+    case "less_than_or_equal":    return num <= cNum                                  ? "yes" : "no";
+    case "between":               return num >= cNum && num <= parseFloat(c.valueTo)  ? "yes" : "no";
+    case "empty":                 return !val                                         ? "yes" : "no";
+    case "not_empty":             return !!val                                        ? "yes" : "no";
+    default:                      return "yes";
   }
 }
 
@@ -369,7 +379,7 @@ async function runAutomation(auto, eventCtx) {
   for (const e of edges) { (adj[e.from] = adj[e.from] || []).push(e); }
 
   const queue   = nodes.filter(n => n.type === "trigger").map(n => ({
-    node: n, ctx: { ...eventCtx, aiOutput: "", loopIndex: 1 }
+    node: n, ctx: { ...eventCtx, aiOutput: "", loopIndex: 1, columnValues: eventCtx.columnValues || {} }
   }));
   const visited = new Set();
 
@@ -482,24 +492,74 @@ export async function handler(event) {
       previousValue: ev.previousValue,
     }));
 
+    // Extract the changed value — handles status, number, formula, text columns
+    function extractValue(val) {
+      if (!val) return "";
+      if (typeof val === "string") { try { val = JSON.parse(val); } catch { return val; } }
+      // Status column: {label:{text:"Done"}}
+      if (val?.label?.text != null) return String(val.label.text);
+      // Number column: {value:42} or just a number
+      if (val?.value != null) return String(val.value);
+      // Text column: {text:"something"}
+      if (val?.text != null) return String(val.text);
+      // Formula columns often send {value:"42.5"} or {displayValue:"42.5"}
+      if (val?.displayValue != null) return String(val.displayValue);
+      // Fallback: stringify the whole thing if it's a simple scalar
+      if (typeof val === "number") return String(val);
+      return "";
+    }
+
+    const rawNewValue = extractValue(ev.value);
+
     const ctx = {
       boardId:    String(ev.boardId || ""),
       itemId:     String(ev.pulseId || ev.itemId || ""),
       itemName:   ev.pulseName || ev.itemName || "",
       columnId:   ev.columnId || "",
-      newValue:   ev.value?.label?.text || ev.value?.name || (typeof ev.value === "string" ? ev.value : "") || "",
-      itemStatus: ev.value?.label?.text || ev.value?.name || "",
+      newValue:   rawNewValue,
+      itemStatus: rawNewValue, // used by condition evaluator
       userId:     String(ev.userId || ""),
       aiOutput:   "",
+      // Store column values map — populated lazily below if needed
+      columnValues: {},
     };
 
-    console.log("Parsed ctx:", JSON.stringify(ctx));
+    console.log("Parsed ctx:", JSON.stringify({...ctx, columnValues:"(lazy)"}));
 
-    // Find matching active automations and run them
+    // Find matching active automations
     const all     = await dbGetActive();
     const matched = (all || []).filter(a =>
       (a.nodes || []).filter(n => n.type === "trigger").some(t => triggerMatches(t, ctx))
     );
+
+    if (matched.length > 0 && ctx.itemId) {
+      // Fetch all live column values for the item once — conditions need accurate numbers
+      // especially for formula columns which don't send computed values in the webhook
+      try {
+        const token = matched[0].monday_token || matched[0].mondayToken || process.env.MONDAY_TOKEN;
+        const itemData = await mondayGQL(
+          `query($id:Int!){items(ids:[$id]){name column_values{id text value type}}}`,
+          { id: parseInt(ctx.itemId) },
+          token
+        );
+        const item = itemData?.items?.[0];
+        if (item) {
+          ctx.itemName = item.name || ctx.itemName;
+          item.column_values.forEach(cv => {
+            const v = extractValue(cv.value) || cv.text || "";
+            ctx.columnValues[cv.id] = v;
+          });
+          // If the triggered column's live value is available, prefer it
+          if (ctx.columnId && ctx.columnValues[ctx.columnId]) {
+            ctx.newValue   = ctx.columnValues[ctx.columnId];
+            ctx.itemStatus = ctx.columnValues[ctx.columnId];
+          }
+        }
+        console.log("Fetched live column values for item", ctx.itemId);
+      } catch(e) {
+        console.log("Could not fetch live column values:", e.message);
+      }
+    }
 
     // Run without awaiting so we respond to monday within their 5s window
     Promise.allSettled(matched.map(a => runAutomation(a, ctx)));
