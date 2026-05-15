@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>monday Automation Builder</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0D0D0F;font-family:'DM Mono','Fira Code',monospace;overflow:hidden}
+  input,select,textarea,button{font-family:inherit}
+  ::-webkit-scrollbar{width:4px;height:4px}
+  ::-webkit-scrollbar-track{background:#111118}
+  ::-webkit-scrollbar-thumb{background:#2A2A3A;border-radius:2px}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef, useEffect, useCallback } = React;
+
+const NC = {
+  trigger:   { bg:"#0F0F1E", border:"#6C63FF", label:"#9B8FFF", text:"#E8E6FF", badge:"#6C63FF" },
+  condition: { bg:"#0D1A0D", border:"#2ECC71", label:"#52D98C", text:"#D6F5E3", badge:"#27AE60" },
+  action:    { bg:"#1A1200", border:"#F39C12", label:"#F5B942", text:"#FEF3D7", badge:"#E67E22" },
+  wait:      { bg:"#0A1220", border:"#3498DB", label:"#5DADE2", text:"#D6EAF8", badge:"#2980B9" },
+  loop:      { bg:"#1A0A1A", border:"#E91E8C", label:"#F06BBD", text:"#FCE4F4", badge:"#C0186D" },
+};
+const BG = "#0D0D0F";
+const ANTHROPIC_API = "https://api.anthropic.com/v1/messages";
+// All monday calls go through the local Netlify proxy - no CORS issues
+const PROXY = "/api/monday";
+
+// ─── Storage (localStorage since we're not in Claude) ─────────────────────────
+function loadLibrary() { try { return JSON.parse(localStorage.getItem("automations-v2")||"[]"); } catch { return []; } }
+function saveLibrary(lib) { try { localStorage.setItem("automations-v2", JSON.stringify(lib)); } catch {} }
+
+function serializeAuto(name, nodes, edges, isActive) {
+  return { id:`auto-${Date.now()}`, name, isActive, updatedAt:new Date().toISOString(),
+    nodeCount:nodes.length, edgeCount:edges.length, nodes, edges, deployStatus:"draft" };
+}
+
+// ─── monday GraphQL via proxy ─────────────────────────────────────────────────
+async function mondayGQL(token, query, variables = {}) {
+  const res = await fetch(PROXY, {
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify({ token, query, variables }),
+  });
+  if (!res.ok) throw new Error(`Proxy ${res.status}`);
+  const json = await res.json();
+  if (json.errors?.length) throw new Error(json.errors[0].message);
+  return json.data;
+}
+
+async function fetchBoardData(token) {
+  const data = await mondayGQL(token, `{
+    boards(limit:20,order_by:last_used){
+      id name
+      groups{id title}
+      columns{id title type settings_str}
+    }
+  }`);
+  return (data.boards||[]).map(b=>({
+    id:b.id, name:b.name,
+    groups:(b.groups||[]).map(g=>({id:g.id,name:g.title})),
+    columns:(b.columns||[]).map(col=>{
+      let values=[];
+      try{const s=JSON.parse(col.settings_str||"{}");if(s.labels)values=Object.values(s.labels).filter(Boolean);}catch{}
+      return{id:col.id,name:col.title,type:col.type,values};
+    }),
+  }));
+}
+
+// ─── Deploy API ───────────────────────────────────────────────────────────────
+async function netlifyReq(secret, method, path, body) {
+  const res = await fetch(`/api${path}`, {
+    method,
+    headers:{ "Content-Type":"application/json", "x-automation-secret":secret },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) { const t=await res.text(); throw new Error(`${res.status}: ${t.slice(0,100)}`); }
+  return res.json();
+}
+const deployToNetlify   = (secret, auto) => netlifyReq(secret, "PUT",    `/automations/${auto.id}`, auto);
+const deleteFromNetlify = (secret, id)   => netlifyReq(secret, "DELETE", `/automations/${id}`);
+const listDeployed      = (secret)       => netlifyReq(secret, "GET",    "/automations");
+
+// ─── Token resolution ─────────────────────────────────────────────────────────
+function resolveTokens(str, ctx={}) {
+  return (str||"")
+    .replace(/\{\{item\.name\}\}/g,   ctx.itemName  ||"Sample Item")
+    .replace(/\{\{item\.status\}\}/g, ctx.itemStatus||"Done")
+    .replace(/\{\{item\.owner\}\}/g,  ctx.itemOwner ||"User")
+    .replace(/\{\{item\.id\}\}/g,     ctx.itemId    ||"")
+    .replace(/\{\{today\}\}/g,        new Date().toISOString().slice(0,10))
+    .replace(/\{\{ai\.output\}\}/g,   ctx.aiOutput  ||"")
+    .replace(/\{\{loop\.index\}\}/g,  String(ctx.loopIndex||1));
+}
+
+// ─── Browser action execution ─────────────────────────────────────────────────
+async function execActionBrowser(node, ctx, token, anthropicKey) {
+  const c = node.config||{};
+  switch(node.subtype){
+    case"create_group":{
+      const name=resolveTokens(c.groupName||"New Group",ctx);
+      const data=await mondayGQL(token,`mutation($b:ID!,$n:String!){create_group(board_id:$b,group_name:$n){id title}}`,{b:c.board,n:name});
+      return{ok:true,result:`Created group "${data.create_group.title}"`};
+    }
+    case"create_item":{
+      const name=resolveTokens(c.itemName||"New Item",ctx);
+      const vars={b:parseInt(c.board),n:name,cv:"{}"};if(c.group)vars.g=c.group;
+      const data=await mondayGQL(token,`mutation($b:Int!,$n:String!,$g:String,$cv:JSON!){create_item(board_id:$b,item_name:$n,group_id:$g,column_values:$cv){id name}}`,vars);
+      return{ok:true,result:`Created item "${data.create_item.name}"`};
+    }
+    case"change_col":{
+      if(!ctx.itemId)return{ok:false,result:"No item ID in test context"};
+      await mondayGQL(token,`mutation($b:Int!,$i:Int!,$c:String!,$v:JSON!){change_column_value(board_id:$b,item_id:$i,column_id:$c,value:$v){id}}`,
+        {b:parseInt(c.board),i:parseInt(ctx.itemId),c:c.column,v:JSON.stringify({label:c.toValue})});
+      return{ok:true,result:`Set "${c.column}" → "${c.toValue}"`};
+    }
+    case"move_item":{
+      if(!ctx.itemId)return{ok:false,result:"No item ID in test context"};
+      await mondayGQL(token,`mutation($i:Int!,$g:String!){move_item_to_group(item_id:$i,group_id:$g){id}}`,{i:parseInt(ctx.itemId),g:c.group});
+      return{ok:true,result:`Moved to group "${c.group}"`};
+    }
+    case"http_request":{
+      const url=resolveTokens(c.url||"",ctx);
+      if(!url)return{ok:false,result:"No URL configured"};
+      try{const res=await fetch(url,{method:c.method||"POST",headers:{"Content-Type":"application/json"},body:resolveTokens(c.body||"{}",ctx)});
+        return{ok:res.ok,result:`${c.method} ${url} → ${res.status}`};}
+      catch(e){return{ok:false,result:e.message};}
+    }
+    case"ai_step":{
+      if(!anthropicKey)return{ok:false,result:"No Anthropic key — add it in Settings"};
+      const prompt=resolveTokens(c.prompt||"",ctx);
+      const res=await fetch(ANTHROPIC_API,{method:"POST",
+        headers:{"Content-Type":"application/json","x-api-key":anthropicKey,"anthropic-version":"2023-06-01"},
+        body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:500,messages:[{role:"user",content:prompt}]})});
+      const data=await res.json();const output=data.content?.[0]?.text||"";
+      return{ok:true,result:output.slice(0,200),aiOutput:output};
+    }
+    case"notify":
+      return{ok:true,result:`Notify ${c.who||"assignee"}: "${resolveTokens(c.message||"",ctx).slice(0,60)}"`,simulated:true};
+    default:
+      return{ok:false,result:`No executor for "${node.subtype}"`};
+  }
+}
+
+const TEMPLATES = {
+  trigger:[
+    {subtype:"status_change", label:"Status changes",      icon:"⚡",desc:"When a status column changes"},
+    {subtype:"item_created",  label:"Item created",         icon:"✦", desc:"When a new item is added"},
+    {subtype:"date_reached",  label:"Date reached",         icon:"◈", desc:"When a date column arrives"},
+    {subtype:"column_changed",label:"Column value changes", icon:"↯", desc:"When any column is updated"},
+  ],
+  condition:[
+    {subtype:"if_else",label:"If / Else",    icon:"⬡",desc:"Branch on a column value"},
+    {subtype:"filter", label:"Filter / Gate",icon:"⊟",desc:"Stop if condition is false"},
+  ],
+  action:[
+    {subtype:"notify",      label:"Notify user",       icon:"◎",desc:"Send a notification"},
+    {subtype:"change_col",  label:"Change column",     icon:"◈",desc:"Set a column value"},
+    {subtype:"create_item", label:"Create item",       icon:"✦",desc:"Add item to a board"},
+    {subtype:"create_group",label:"Create group",      icon:"⊡",desc:"Add group to a board"},
+    {subtype:"move_item",   label:"Move item to group",icon:"→",desc:"Move item to another group"},
+    {subtype:"http_request",label:"HTTP request",      icon:"⬡",desc:"Call a webhook or API"},
+    {subtype:"ai_step",     label:"AI step (Claude)",  icon:"◉",desc:"Use Claude to process"},
+  ],
+  wait:[
+    {subtype:"wait_time", label:"Wait",           icon:"◷",desc:"Pause for a duration"},
+    {subtype:"wait_event",label:"Wait for event", icon:"◈",desc:"Wait until condition met"},
+  ],
+};
+
+const DEF_CFG={
+  status_change:{board:"",column:"",toValue:""},item_created:{board:""},
+  date_reached:{board:"",column:"",offset:"0"},column_changed:{board:"",column:""},
+  if_else:{board:"",column:"",operator:"equals",value:""},filter:{board:"",column:"",operator:"equals",value:""},
+  notify:{who:"assignee",message:""},change_col:{board:"",column:"",toValue:""},
+  create_item:{board:"",group:"",itemName:"{{item.name}}"},create_group:{board:"",groupName:"Completed — {{item.name}}"},
+  move_item:{board:"",group:""},http_request:{method:"POST",url:"",body:'{"item":"{{item.name}}"}'},
+  ai_step:{prompt:"Summarize {{item.name}} and suggest next steps."},
+  wait_time:{amount:"1",unit:"business days"},wait_event:{board:"",column:"",operator:"equals",value:""},
+};
+
+const NW=214,NH=74,PR=6;
+let _uid=300;const uid=()=>`n${++_uid}`;
+
+const INIT_NODES=[
+  {id:"n1",type:"trigger",  subtype:"status_change", label:"Status changes to Done",       x:50, y:200,outputs:["yes"],config:{board:"",column:"",toValue:"Done"}},
+  {id:"n2",type:"condition",subtype:"if_else",        label:"Is priority High?",            x:310,y:200,outputs:["yes","no"],config:{board:"",column:"",operator:"equals",value:"High"}},
+  {id:"n3",type:"action",   subtype:"create_group",   label:"Create group on target board", x:560,y:110,outputs:["yes"],config:{board:"",groupName:"Completed — {{item.name}}"}},
+  {id:"n4",type:"action",   subtype:"notify",         label:"Notify owner",                 x:560,y:330,outputs:["yes"],config:{who:"assignee",message:"{{item.name}} is done."}},
+];
+const INIT_EDGES=[
+  {id:"e1",from:"n1",fromPort:"yes",to:"n2",toPort:"in",label:""},
+  {id:"e2",from:"n2",fromPort:"yes",to:"n3",toPort:"in",label:"Yes"},
+  {id:"e3",from:"n2",fromPort:"no", to:"n4",toPort:"in",label:"No"},
+];
+
+function portPos(node,port){const my=node.y+NH/2;if(port==="in")return{x:node.x,y:my};if(port==="yes")return{x:node.x+NW,y:my-(node.outputs?.length>1?10:0)};if(port==="no")return{x:node.x+NW,y:my+12};return{x:node.x+NW,y:my};}
+function ePath(f,t){const dx=t.x-f.x,cx=Math.max(60,Math.abs(dx)*0.55);return`M${f.x} ${f.y} C${f.x+cx} ${f.y} ${t.x-cx} ${t.y} ${t.x} ${t.y}`;}
+
+function nodeSummary(node,boards){
+  const c=node.config||{};const bn=boards.find(b=>b.id===c.board)?.name||"";
+  switch(node.subtype){
+    case"status_change":return c.toValue?`${bn} → ${c.toValue}`:bn;
+    case"item_created":return bn;case"if_else":return c.value?`${c.column} ${c.operator} "${c.value}"`:c.column||"";
+    case"notify":return c.who||"assignee";case"change_col":return c.toValue?`${c.column} → ${c.toValue}`:c.column||"";
+    case"create_item":return bn?`on ${bn}`:"";
+    case"create_group":return c.groupName?resolveTokens(c.groupName,{itemName:"Item"}).slice(0,20):bn?`on ${bn}`:"";
+    case"move_item":return c.group?`→ ${c.group}`:"";
+    case"http_request":return(c.url||c.method||"POST").replace(/https?:\/\//,"").slice(0,24);
+    case"ai_step":return(c.prompt||"Claude").slice(0,22)+"…";
+    case"wait_time":return`${c.amount||1} ${c.unit||"days"}`;
+    default:return "";
+  }
+}
+
+function ConfigForm({node,onChange,boards}){
+  const c=node.config||{};const set=(k,v)=>onChange({...c,[k]:v});
+  const board=boards.find(b=>b.id===c.board);const cols=board?.columns||[];
+  const col=cols.find(x=>x.id===c.column);const groups=board?.groups||[];
+  const fi={
+    lbl:{display:"block",fontSize:9.5,color:"#666",marginBottom:3,letterSpacing:0.4,textTransform:"uppercase"},
+    inp:{width:"100%",background:"#181825",border:"0.5px solid #2A2A3A",color:"#C8C5E8",padding:"6px 8px",borderRadius:5,fontSize:12,fontFamily:"inherit",boxSizing:"border-box"},
+    row:{marginBottom:11},hint:{fontSize:9.5,color:"#444",marginTop:4,lineHeight:1.45},
+    pill:{display:"inline-block",padding:"2px 8px",borderRadius:10,fontSize:9.5,background:"#6C63FF1A",color:"#9B8FFF",border:"0.5px solid #6C63FF33",marginRight:4,marginBottom:4,cursor:"pointer",userSelect:"none"},
+    r2:{display:"flex",gap:8,marginBottom:11,alignItems:"flex-end"},
+  };
+  const BSel=({label="Board"})=>(<div style={fi.row}><label style={fi.lbl}>{label}</label><select style={fi.inp} value={c.board||""} onChange={e=>set("board",e.target.value)}><option value="">— select board —</option>{boards.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}</select></div>);
+  const CSel=({label="Column",flt})=>{const list=flt?cols.filter(flt):cols;return(<div style={fi.row}><label style={fi.lbl}>{label}</label><select style={fi.inp} value={c.column||""} onChange={e=>set("column",e.target.value)}><option value="">— select column —</option>{list.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></div>);};
+  const VSel=({fk="toValue",label="Value"})=>col?.type==="color"||col?.type==="status"?(<div style={fi.row}><label style={fi.lbl}>{label}</label><select style={fi.inp} value={c[fk]||""} onChange={e=>set(fk,e.target.value)}><option value="">— any —</option>{(col.values||[]).map(v=><option key={v} value={v}>{v}</option>)}</select></div>):(<div style={fi.row}><label style={fi.lbl}>{label}</label><input style={fi.inp} value={c[fk]||""} onChange={e=>set(fk,e.target.value)} placeholder="Value…"/></div>);
+  const GSel=({label="Group",fk="group"})=>(<div style={fi.row}><label style={fi.lbl}>{label}</label><select style={fi.inp} value={c[fk]||""} onChange={e=>set(fk,e.target.value)}><option value="">— select group —</option>{groups.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}</select></div>);
+  const OSel=()=>(<div style={fi.row}><label style={fi.lbl}>Operator</label><select style={fi.inp} value={c.operator||"equals"} onChange={e=>set("operator",e.target.value)}><option value="equals">equals</option><option value="not_equals">does not equal</option><option value="contains">contains</option><option value="empty">is empty</option><option value="not_empty">is not empty</option></select></div>);
+  const Tokens=({tokens,field})=>(<div style={{marginBottom:8}}>{tokens.map(tok=><span key={tok} style={fi.pill} onClick={()=>set(field,(c[field]||"")+" "+tok)}>{tok}</span>)}</div>);
+  if(boards.length===0)return <div style={{textAlign:"center",padding:"20px 0",color:"#444",fontSize:12}}>Connect monday.com in Settings<br/>to load real boards.</div>;
+  switch(node.subtype){
+    case"status_change":return(<><BSel label="Watch board"/><CSel label="Status column" flt={x=>x.type==="color"||x.type==="status"}/>{col&&<VSel fk="toValue" label="Changes to"/>}</>);
+    case"item_created":return(<><BSel label="Watch board"/><p style={fi.hint}>Fires when any new item is created.</p></>);
+    case"date_reached":return(<><BSel label="Watch board"/><CSel label="Date column" flt={x=>x.type==="date"}/><div style={fi.row}><label style={fi.lbl}>Offset days</label><input style={fi.inp} type="number" value={c.offset||"0"} onChange={e=>set("offset",e.target.value)}/></div></>);
+    case"column_changed":return(<><BSel label="Watch board"/><CSel label="Column"/></>);
+    case"if_else":return(<><BSel label="Check board"/><CSel label="Column"/><OSel/>{c.operator!=="empty"&&c.operator!=="not_empty"&&<VSel fk="value" label="Value"/>}<p style={fi.hint}>Routes <strong style={{color:"#9B8FFF"}}>yes</strong> if true, <strong style={{color:"#E91E8C"}}>no</strong> if false.</p></>);
+    case"filter":return(<><BSel label="Check board"/><CSel label="Column"/><OSel/>{c.operator!=="empty"&&<VSel fk="value" label="Value"/>}</>);
+    case"notify":return(<>
+      <div style={fi.row}><label style={fi.lbl}>Notify</label><select style={fi.inp} value={c.who||"assignee"} onChange={e=>set("who",e.target.value)}><option value="assignee">Item assignee</option><option value="owner">Board owner(s)</option></select></div>
+      <div style={fi.row}><label style={fi.lbl}>Message</label><textarea style={{...fi.inp,height:68,resize:"vertical"}} value={c.message||""} onChange={e=>set("message",e.target.value)} placeholder="{{item.name}} changed to {{item.status}}."/></div>
+      <Tokens tokens={["{{item.name}}","{{item.status}}","{{today}}"]} field="message"/>
+    </>);
+    case"change_col":return(<><BSel label="Target board"/><CSel label="Column to change"/>{col?.type==="color"||col?.type==="status"?<VSel fk="toValue" label="Set value to"/>:<div style={fi.row}><label style={fi.lbl}>Set to</label><input style={fi.inp} value={c.toValue||""} onChange={e=>set("toValue",e.target.value)} placeholder="Value or {{token}}…"/></div>}</>);
+    case"create_item":return(<><BSel label="Board"/>{c.board&&<GSel label="In group"/>}<div style={fi.row}><label style={fi.lbl}>Item name</label><input style={fi.inp} value={c.itemName||""} onChange={e=>set("itemName",e.target.value)}/></div><Tokens tokens={["{{item.name}}","{{item.status}}","{{today}}"]} field="itemName"/></>);
+    case"create_group":return(<>
+      <BSel label="Create group on board"/>
+      <div style={fi.row}><label style={fi.lbl}>Group name</label><input style={fi.inp} value={c.groupName||""} onChange={e=>set("groupName",e.target.value)} placeholder="Completed — {{item.name}}"/></div>
+      <Tokens tokens={["{{item.name}}","{{item.status}}","{{today}}"]} field="groupName"/>
+      {c.groupName&&<div style={fi.row}><label style={fi.lbl}>Preview</label><div style={{...fi.inp,color:"#F5B942",pointerEvents:"none"}}>{resolveTokens(c.groupName,{itemName:"Project Alpha"})}</div></div>}
+    </>);
+    case"move_item":return(<><BSel label="Target board"/>{c.board&&<GSel label="Move item to group"/>}</>);
+    case"http_request":return(<>
+      <div style={fi.r2}><div style={{width:76}}><label style={fi.lbl}>Method</label><select style={fi.inp} value={c.method||"POST"} onChange={e=>set("method",e.target.value)}>{["GET","POST","PUT","PATCH","DELETE"].map(m=><option key={m}>{m}</option>)}</select></div><div style={{flex:1}}><label style={fi.lbl}>URL</label><input style={fi.inp} value={c.url||""} onChange={e=>set("url",e.target.value)} placeholder="https://…"/></div></div>
+      <div style={fi.row}><label style={fi.lbl}>Body (JSON)</label><textarea style={{...fi.inp,height:78,resize:"vertical",fontFamily:"monospace",fontSize:11}} value={c.body||""} onChange={e=>set("body",e.target.value)}/></div>
+      <Tokens tokens={["{{item.name}}","{{item.status}}","{{item.id}}"]} field="body"/>
+    </>);
+    case"ai_step":return(<>
+      <div style={fi.row}><label style={fi.lbl}>Claude prompt</label><textarea style={{...fi.inp,height:78,resize:"vertical"}} value={c.prompt||""} onChange={e=>set("prompt",e.target.value)}/><p style={fi.hint}>Requires Anthropic key in Settings.</p></div>
+      <Tokens tokens={["{{item.name}}","{{item.status}}","{{item.owner}}"]} field="prompt"/>
+    </>);
+    case"wait_time":return(<>
+      <div style={fi.r2}><div style={{width:70}}><label style={fi.lbl}>Amount</label><input style={fi.inp} type="number" min="1" value={c.amount||"1"} onChange={e=>set("amount",e.target.value)}/></div><div style={{flex:1}}><label style={fi.lbl}>Unit</label><select style={fi.inp} value={c.unit||"business days"} onChange={e=>set("unit",e.target.value)}>{["minutes","hours","business days","weeks"].map(u=><option key={u}>{u}</option>)}</select></div></div>
+    </>);
+    case"wait_event":return(<><BSel label="Watch board"/><CSel label="Column"/><OSel/>{c.operator==="equals"&&<VSel fk="value" label="Value"/>}</>);
+    default:return(<p style={{color:"#555",fontSize:12}}>No config for this node type.</p>);
+  }
+}
+
+function DeployPanel({webhookSecret,setWebhookSecret,nodes,edges,automationName,isActive,onDeploySuccess}){
+  const [sec,setSec]=useState(webhookSecret);
+  const [status,setStatus]=useState(null);
+  const [msg,setMsg]=useState("");
+  const [deployed,setDeployed]=useState([]);
+  const [loadingList,setLoadingList]=useState(false);
+  const inp={width:"100%",background:"#181825",border:"0.5px solid #2A2A3A",color:"#C8C5E8",padding:"7px 9px",borderRadius:5,fontSize:12,fontFamily:"monospace",boxSizing:"border-box"};
+  const fetchDeployed=async()=>{if(!sec)return;setLoadingList(true);try{const d=await listDeployed(sec);setDeployed(d.automations||[]);}catch{setDeployed([]);}setLoadingList(false);};
+  useEffect(()=>{if(sec)fetchDeployed();},[sec]);
+  const deploy=async(activate)=>{
+    setWebhookSecret(sec);setStatus("deploying");setMsg("");
+    try{
+      const auto={...serializeAuto(automationName,nodes,edges,activate??isActive),deployedAt:new Date().toISOString(),deployStatus:activate?"active":"deployed"};
+      await deployToNetlify(sec,auto);
+      setStatus("ok");setMsg(`Deployed "${automationName}"`);
+      onDeploySuccess(auto);await fetchDeployed();
+    }catch(e){setStatus("error");setMsg(e.message);}
+  };
+  const undeploy=async(id)=>{try{await deleteFromNetlify(sec,id);await fetchDeployed();}catch(e){setMsg(e.message);}};
+  const sc=status==="ok"?"#52D98C":status==="error"?"#E74C3C":"#5DADE2";
+  const fmt=iso=>new Date(iso).toLocaleDateString(undefined,{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"});
+  return(
+    <div style={{display:"flex",flexDirection:"column",height:"100%",overflow:"hidden"}}>
+      <div style={{padding:"10px 12px 8px",borderBottom:"0.5px solid #1A1A28"}}><span style={{fontSize:10,color:"#52D98C",letterSpacing:1,textTransform:"uppercase",fontWeight:700}}>⬡ Deploy</span></div>
+      <div style={{overflowY:"auto",flex:1,padding:"12px"}}>
+        <div style={{marginBottom:14}}><label style={{display:"block",fontSize:9.5,color:"#F5B942",marginBottom:3,letterSpacing:0.4,textTransform:"uppercase"}}>Webhook Secret</label><input type="password" style={inp} value={sec} onChange={e=>setSec(e.target.value)} placeholder="your-webhook-secret"/><p style={{fontSize:9.5,color:"#444",marginTop:3,lineHeight:1.4}}>Must match WEBHOOK_SECRET in your Netlify env vars</p></div>
+        <div style={{display:"flex",gap:6,marginBottom:12}}>
+          <button style={{flex:1,background:"#27AE6022",color:"#52D98C",border:"0.5px solid #27AE6055",padding:"7px",borderRadius:5,cursor:"pointer",fontSize:11,fontFamily:"inherit",fontWeight:600,opacity:(!sec||status==="deploying")?0.5:1}} onClick={()=>deploy(false)} disabled={!sec||status==="deploying"}>{status==="deploying"?"Deploying…":"↑ Deploy"}</button>
+          <button style={{flex:1,background:"#6C63FF22",color:"#9B8FFF",border:"0.5px solid #6C63FF55",padding:"7px",borderRadius:5,cursor:"pointer",fontSize:11,fontFamily:"inherit",fontWeight:600,opacity:(!sec||status==="deploying")?0.5:1}} onClick={()=>deploy(true)} disabled={!sec||status==="deploying"}>↑ Deploy + Activate</button>
+        </div>
+        {status&&status!=="deploying"&&<div style={{padding:"7px 10px",background:sc+"11",border:`0.5px solid ${sc}33`,borderRadius:5,fontSize:11,color:sc,marginBottom:12,wordBreak:"break-word"}}>{status==="ok"?"✓ ":"✗ "}{msg}</div>}
+        {sec&&(<>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}><div style={{fontSize:9,color:"#444",letterSpacing:1,textTransform:"uppercase"}}>Deployed ({deployed.length})</div><button style={{background:"transparent",border:"none",color:"#555",fontSize:10,cursor:"pointer",fontFamily:"inherit"}} onClick={fetchDeployed}>{loadingList?"…":"↺"}</button></div>
+          {deployed.length===0&&!loadingList&&<div style={{color:"#2E2E3E",fontSize:11,textAlign:"center",padding:"10px 0"}}>None deployed yet</div>}
+          {deployed.map(auto=>(<div key={auto.id} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 0",borderBottom:"0.5px solid #181825"}}>
+            <span style={{width:6,height:6,borderRadius:3,background:auto.is_active?"#52D98C":"#555",flexShrink:0}}/>
+            <div style={{flex:1,minWidth:0}}><div style={{fontSize:11,color:"#C8C5E8",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{auto.name}</div><div style={{fontSize:9,color:"#444",fontFamily:"monospace"}}>{fmt(auto.updated_at)}</div></div>
+            <button style={{background:"transparent",border:"0.5px solid #E74C3C33",color:"#E74C3C88",padding:"2px 6px",borderRadius:3,cursor:"pointer",fontSize:9,fontFamily:"inherit"}} onClick={()=>undeploy(auto.id)}>remove</button>
+          </div>))}
+        </>)}
+      </div>
+    </div>
+  );
+}
+
+function LibraryPanel({library,onLoad,onDelete,onExportAll,onImport,currentName,onSaveNew,onOverwrite,saving}){
+  const fileRef=useRef();
+  const [confirmDel,setConfirmDel]=useState(null);
+  const fmt=iso=>new Date(iso).toLocaleDateString(undefined,{month:"short",day:"numeric"})+" "+new Date(iso).toLocaleTimeString(undefined,{hour:"2-digit",minute:"2-digit"});
+  const handleFile=e=>{const f=e.target.files?.[0];if(!f)return;const r=new FileReader();r.onload=ev=>{try{onImport(JSON.parse(ev.target.result));}catch{alert("Invalid file");}};r.readAsText(f);e.target.value="";};
+  const row={display:"flex",alignItems:"center",gap:8,padding:"7px 12px",borderBottom:"0.5px solid #181825"};
+  const sm={fontSize:9,color:"#555",fontFamily:"monospace"};
+  const depColor=s=>s==="active"?"#52D98C":s==="deployed"?"#5DADE2":"#333";
+  const depLabel=s=>s==="active"?"● live":s==="deployed"?"● deployed":"○ draft";
+  return(
+    <div style={{display:"flex",flexDirection:"column",height:"100%",overflow:"hidden"}}>
+      <div style={{padding:"10px 12px 8px",borderBottom:"0.5px solid #1A1A28",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <span style={{fontSize:10,color:"#F5B942",letterSpacing:1,textTransform:"uppercase",fontWeight:700}}>Automations</span>
+        <div style={{display:"flex",gap:5}}>
+          <button style={Sb.mini} onClick={()=>fileRef.current?.click()}>↑ Import</button>
+          {library.length>0&&<button style={Sb.mini} onClick={onExportAll}>↓ Export all</button>}
+        </div>
+        <input ref={fileRef} type="file" accept=".json" style={{display:"none"}} onChange={handleFile}/>
+      </div>
+      <div style={{padding:"8px 12px",borderBottom:"0.5px solid #181825",display:"flex",gap:6}}>
+        <button style={{...Sb.saveNew,flex:1,opacity:saving?0.5:1}} onClick={onSaveNew} disabled={saving}>{saving?"Saving…":"+ Save current"}</button>
+        {library.some(a=>a.name===currentName)&&<button style={{...Sb.overwrite,opacity:saving?0.5:1}} onClick={onOverwrite} disabled={saving} title="Overwrite">↺</button>}
+      </div>
+      <div style={{flex:1,overflowY:"auto"}}>
+        {library.length===0&&<div style={{textAlign:"center",padding:"28px 16px",color:"#2E2E3E",fontSize:11,lineHeight:1.7}}>No saved automations.<br/><strong style={{color:"#9B8FFF"}}>+ Save current</strong> to start.</div>}
+        {[...library].reverse().map(auto=>(<div key={auto.id} style={row}>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:12,color:"#C8C5E8",fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{auto.name}</div>
+            <div style={{...sm,marginTop:2,display:"flex",gap:8}}><span>{auto.nodeCount}n · {auto.edgeCount}e</span><span>{fmt(auto.updatedAt)}</span><span style={{color:depColor(auto.deployStatus)}}>{depLabel(auto.deployStatus)}</span></div>
+          </div>
+          <div style={{display:"flex",gap:4,flexShrink:0}}>
+            <button style={Sb.act} onClick={()=>exportOne(auto)}>↓</button>
+            {confirmDel===auto.id?<><button style={{...Sb.act,color:"#E74C3C",borderColor:"#E74C3C44"}} onClick={()=>{onDelete(auto.id);setConfirmDel(null);}}>✓</button><button style={Sb.act} onClick={()=>setConfirmDel(null)}>✕</button></>:<button style={Sb.act} onClick={()=>setConfirmDel(auto.id)}>⌫</button>}
+            <button style={{...Sb.act,color:"#9B8FFF",borderColor:"#6C63FF44"}} onClick={()=>onLoad(auto)}>Load</button>
+          </div>
+        </div>))}
+      </div>
+    </div>
+  );
+}
+
+function exportOne(auto){const blob=new Blob([JSON.stringify(auto,null,2)],{type:"application/json"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`${auto.name.replace(/\s+/g,"-")}.json`;a.click();URL.revokeObjectURL(url);}
+
+const Sb={
+  mini:{background:"transparent",border:"0.5px solid #252535",color:"#555",padding:"3px 8px",borderRadius:4,cursor:"pointer",fontSize:9.5,fontFamily:"inherit"},
+  saveNew:{background:"#6C63FF22",color:"#9B8FFF",border:"0.5px solid #6C63FF44",padding:"6px 10px",borderRadius:5,cursor:"pointer",fontSize:11,fontFamily:"inherit",fontWeight:600},
+  overwrite:{background:"transparent",color:"#F5B942",border:"0.5px solid #F39C1244",padding:"6px 10px",borderRadius:5,cursor:"pointer",fontSize:12,fontFamily:"inherit"},
+  act:{background:"transparent",border:"0.5px solid #252535",color:"#666",padding:"3px 7px",borderRadius:4,cursor:"pointer",fontSize:10,fontFamily:"inherit"},
+};
+
+function SettingsPanel({mondayToken,setMondayToken,anthropicKey,setAnthropicKey,boards,onConnect,connecting,connectError}){
+  const [mt,setMt]=useState(mondayToken);const [ak,setAk]=useState(anthropicKey);
+  const inp={width:"100%",background:"#181825",border:"0.5px solid #2A2A3A",color:"#C8C5E8",padding:"7px 9px",borderRadius:5,fontSize:12,fontFamily:"monospace",boxSizing:"border-box"};
+  return(
+    <div style={{padding:"14px",overflowY:"auto",flex:1}}>
+      <div style={{fontSize:9,color:"#555",letterSpacing:1,textTransform:"uppercase",marginBottom:12}}>API Credentials</div>
+      <div style={{marginBottom:12}}>
+        <label style={{display:"block",fontSize:9.5,color:"#9B8FFF",marginBottom:3,letterSpacing:0.4,textTransform:"uppercase"}}>monday.com API Token *</label>
+        <input type="password" style={inp} value={mt} onChange={e=>setMt(e.target.value)} placeholder="eyJhbGciOiJ…"/>
+        <p style={{fontSize:9.5,color:"#444",marginTop:3,lineHeight:1.4}}>Profile → Developers → API v2 Token</p>
+      </div>
+      <div style={{marginBottom:14}}>
+        <label style={{display:"block",fontSize:9.5,color:"#F5B942",marginBottom:3,letterSpacing:0.4,textTransform:"uppercase"}}>Anthropic API Key (optional)</label>
+        <input type="password" style={inp} value={ak} onChange={e=>setAk(e.target.value)} placeholder="sk-ant-…"/>
+        <p style={{fontSize:9.5,color:"#444",marginTop:3,lineHeight:1.4}}>Only needed for AI step nodes. Get it at console.anthropic.com → API Keys.</p>
+      </div>
+      <button style={{width:"100%",background:boards.length>0?"#27AE6022":"#6C63FF",color:boards.length>0?"#52D98C":"#fff",border:boards.length>0?"0.5px solid #27AE6066":"none",padding:"8px",borderRadius:5,cursor:connecting?"not-allowed":"pointer",fontSize:12,fontFamily:"inherit",fontWeight:600,opacity:connecting?0.6:1}}
+        onClick={()=>{setMondayToken(mt);setAnthropicKey(ak);onConnect(mt);}} disabled={connecting}>
+        {connecting?"Connecting…":boards.length>0?"✓ Reconnect":"Connect to monday.com"}
+      </button>
+      {connectError&&<div style={{marginTop:10,padding:"8px 10px",background:"#E74C3C11",border:"0.5px solid #E74C3C44",borderRadius:5,fontSize:11,color:"#E74C3C"}}>{connectError}</div>}
+      {boards.length>0&&<div style={{marginTop:14}}><div style={{fontSize:9,color:"#444",letterSpacing:1,textTransform:"uppercase",marginBottom:8}}>{boards.length} boards loaded</div>{boards.map(b=><div key={b.id} style={{display:"flex",justifyContent:"space-between",padding:"4px 0",borderBottom:"0.5px solid #1A1A25",fontSize:11}}><span style={{color:"#888"}}>{b.name}</span><span style={{fontFamily:"monospace",fontSize:9,color:"#444"}}>{b.groups.length}g · {b.columns.length}c</span></div>)}</div>}
+      <div style={{marginTop:16,padding:"10px",background:"#1A1A25",borderRadius:6,fontSize:10,color:"#555",lineHeight:1.6}}>
+        This builder is hosted at <strong style={{color:"#888"}}>monday-automation-runner.netlify.app</strong> — all API calls go through your Netlify function, never directly from the browser.
+      </div>
+    </div>
+  );
+}
+
+function LogEntry({entry}){
+  const icon=entry.status==="running"?"⟳":entry.status==="ok"?"✓":entry.status==="skip"?"○":"✗";
+  const color=entry.status==="running"?"#5DADE2":entry.status==="ok"?"#52D98C":entry.status==="skip"?"#555":"#E74C3C";
+  return(<div style={{display:"flex",gap:8,padding:"6px 0",borderBottom:"0.5px solid #1A1A25",fontSize:11}}><span style={{color,fontFamily:"monospace",flexShrink:0,width:10}}>{icon}</span><div style={{flex:1,minWidth:0}}><div style={{color:"#C8C5E8",fontWeight:500,marginBottom:entry.result?2:0}}>{entry.label}</div>{entry.result&&<div style={{color:entry.status==="error"?"#E74C3C88":"#555",wordBreak:"break-word",lineHeight:1.45}}>{entry.result}</div>}{entry.simulated&&<div style={{color:"#F39C1288",fontSize:9,marginTop:2}}>⚠ simulated</div>}</div>{entry.ms!=null&&<span style={{color:"#333",fontFamily:"monospace",flexShrink:0,fontSize:10}}>{entry.ms}ms</span>}</div>);
+}
+
+function App(){
+  const [nodes,setNodes]=useState(INIT_NODES.map(n=>({...n,config:{...(DEF_CFG[n.subtype]||{}),...(n.config||{})}})));
+  const [edges,setEdges]=useState(INIT_EDGES);
+  const [selected,setSelected]=useState(null);
+  const [pan,setPan]=useState({x:20,y:10});
+  const [zoom,setZoom]=useState(0.92);
+  const [dragging,setDragging]=useState(null);
+  const [connecting,setConnecting]=useState(null);
+  const [isPanning,setIsPanning]=useState(false);
+  const [panStart,setPanStart]=useState(null);
+  const [automationName,setAutomationName]=useState("Status Done → Create Group");
+  const [isActive,setIsActive]=useState(false);
+  const [mondayToken,setMondayToken]=useState(()=>localStorage.getItem("mondayToken")||"");
+  const [anthropicKey,setAnthropicKey]=useState(()=>localStorage.getItem("anthropicKey")||"");
+  const [boards,setBoards]=useState([]);
+  const [apiConnecting,setApiConnecting]=useState(false);
+  const [connectError,setConnectError]=useState("");
+  const [webhookSecret,setWebhookSecret]=useState(()=>localStorage.getItem("webhookSecret")||"");
+  const [panel,setPanel]=useState("palette");
+  const [runCtx,setRunCtx]=useState({itemName:"Project Alpha",itemStatus:"Done",itemOwner:"Alice",itemId:""});
+  const [runLog,setRunLog]=useState([]);
+  const [running,setRunning]=useState(false);
+  const [library,setLibrary]=useState(()=>loadLibrary());
+  const [saving,setSaving]=useState(false);
+  const [lastSaved,setLastSaved]=useState(null);
+  const svgRef=useRef(null);
+
+  // Persist tokens to localStorage on this hosted page
+  useEffect(()=>{ if(mondayToken) localStorage.setItem("mondayToken",mondayToken); },[mondayToken]);
+  useEffect(()=>{ if(anthropicKey) localStorage.setItem("anthropicKey",anthropicKey); },[anthropicKey]);
+  useEffect(()=>{ if(webhookSecret) localStorage.setItem("webhookSecret",webhookSecret); },[webhookSecret]);
+
+  // Auto-connect if token already saved
+  useEffect(()=>{ if(mondayToken&&boards.length===0) connectMonday(mondayToken); },[]);
+
+  const svgPt=useCallback((e)=>{const r=svgRef.current.getBoundingClientRect();return{x:(e.clientX-r.left-pan.x)/zoom,y:(e.clientY-r.top-pan.y)/zoom};},[pan,zoom]);
+
+  const connectMonday=async(token)=>{if(!token){setConnectError("Enter your monday.com API token.");return;}setApiConnecting(true);setConnectError("");try{const data=await fetchBoardData(token);setBoards(data);setConnectError("");}catch(e){setConnectError(e.message.slice(0,120));setBoards([]);}finally{setApiConnecting(false);};};
+
+  const saveNew=async()=>{setSaving(true);const auto=serializeAuto(automationName,nodes,edges,isActive);const next=[...library,auto];setLibrary(next);saveLibrary(next);setLastSaved(JSON.stringify({nodes,edges,name:automationName}));setSaving(false);};
+  const overwriteExisting=async()=>{setSaving(true);const auto=serializeAuto(automationName,nodes,edges,isActive);const next=library.map(a=>a.name===automationName?{...auto,id:a.id}:a);setLibrary(next);saveLibrary(next);setLastSaved(JSON.stringify({nodes,edges,name:automationName}));setSaving(false);};
+  const deleteAuto=(id)=>{const next=library.filter(a=>a.id!==id);setLibrary(next);saveLibrary(next);};
+  const loadAuto=(auto)=>{setNodes(auto.nodes);setEdges(auto.edges);setAutomationName(auto.name);setIsActive(auto.isActive||false);setSelected(null);setPanel("palette");setLastSaved(JSON.stringify({nodes:auto.nodes,edges:auto.edges,name:auto.name}));};
+  const importAuto=(data)=>{const items=Array.isArray(data)?data:[data];const stamped=items.map(a=>({...a,id:`auto-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,updatedAt:new Date().toISOString()}));const next=[...library,...stamped];setLibrary(next);saveLibrary(next);if(stamped.length===1)loadAuto(stamped[0]);};
+  const exportAll=()=>{const blob=new Blob([JSON.stringify(library,null,2)],{type:"application/json"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download="monday-automations.json";a.click();URL.revokeObjectURL(url);};
+  const onDeploySuccess=(deployedAuto)=>{const next=library.map(a=>a.name===deployedAuto.name?{...a,deployStatus:deployedAuto.deployStatus,deployedAt:deployedAuto.deployedAt}:a);setLibrary(next);saveLibrary(next);setIsActive(deployedAuto.isActive);};
+
+  const onNodeDown=(e,id)=>{e.stopPropagation();setSelected(id);if(panel!=="run"&&panel!=="deploy")setPanel("config");const pt=svgPt(e),n=nodes.find(n=>n.id===id);setDragging({id,ox:pt.x-n.x,oy:pt.y-n.y});};
+  const onCanvasDown=(e)=>{setSelected(null);setPanel("palette");setIsPanning(true);setPanStart({x:e.clientX-pan.x,y:e.clientY-pan.y});};
+  const onMove=(e)=>{if(dragging){const pt=svgPt(e);setNodes(ns=>ns.map(n=>n.id===dragging.id?{...n,x:pt.x-dragging.ox,y:pt.y-dragging.oy}:n));}else if(isPanning&&panStart)setPan({x:e.clientX-panStart.x,y:e.clientY-panStart.y});else if(connecting){const pt=svgPt(e);setConnecting(c=>({...c,mx:pt.x,my:pt.y}));}};
+  const onUp=()=>{setDragging(null);setIsPanning(false);if(connecting)setConnecting(null);};
+  const onPortDown=(e,nodeId,port)=>{e.stopPropagation();const pt=svgPt(e);setConnecting({fromId:nodeId,fromPort:port,mx:pt.x,my:pt.y});};
+  const onInUp=(e,nodeId)=>{e.stopPropagation();if(!connecting||connecting.fromId===nodeId){setConnecting(null);return;}if(!edges.some(ed=>ed.from===connecting.fromId&&ed.fromPort===connecting.fromPort&&ed.to===nodeId)){setEdges(es=>[...es,{id:`e${Date.now()}`,from:connecting.fromId,fromPort:connecting.fromPort,to:nodeId,toPort:"in",label:connecting.fromPort==="no"?"No":""}]);}setConnecting(null);};
+  useEffect(()=>{const el=svgRef.current;const h=(e)=>{e.preventDefault();setZoom(z=>Math.max(0.25,Math.min(2.5,z*(e.deltaY<0?1.1:0.9))));};el?.addEventListener("wheel",h,{passive:false});return()=>el?.removeEventListener("wheel",h);},[]);
+  const addNode=(type,subtype,label)=>{const id=uid();setNodes(ns=>[...ns,{id,type,subtype,label,x:(220-pan.x)/zoom+Math.random()*60,y:(90-pan.y)/zoom+Math.random()*60,outputs:type==="condition"&&subtype==="if_else"?["yes","no"]:["yes"],config:{...(DEF_CFG[subtype]||{})}}]);setSelected(id);setPanel("config");};
+  const delNode=(id)=>{setNodes(ns=>ns.filter(n=>n.id!==id));setEdges(es=>es.filter(e=>e.from!==id&&e.to!==id));if(selected===id){setSelected(null);setPanel("palette");}};
+  const delEdge=(id)=>setEdges(es=>es.filter(e=>e.id!==id));
+  const updCfg=(nodeId,cfg)=>setNodes(ns=>ns.map(n=>n.id===nodeId?{...n,config:cfg}:n));
+
+  const doTestRun=async()=>{
+    if(!mondayToken){setConnectError("Add your monday.com token in Settings first.");setPanel("settings");return;}
+    setRunning(true);setRunLog([]);const log=[];
+    const addLog=(entry)=>{log.push(entry);setRunLog([...log]);};
+    const queue=nodes.filter(n=>n.type==="trigger").map(n=>({node:n,ctx:{...runCtx}}));
+    const visited=new Set();
+    while(queue.length){
+      const{node,ctx}=queue.shift();if(visited.has(node.id))continue;visited.add(node.id);
+      if(node.type==="trigger"){addLog({label:node.label,status:"ok",result:`Trigger simulated: "${ctx.itemName}" / "${ctx.itemStatus}"`});edges.filter(e=>e.from===node.id).forEach(e=>{const next=nodes.find(n=>n.id===e.to);if(next)queue.push({node:next,ctx:{...ctx}});});}
+      else if(node.type==="condition"){const c=node.config||{};const val=ctx.itemStatus;const match=c.operator==="equals"?val===c.value:c.operator==="not_equals"?val!==c.value:c.operator==="contains"?(val||"").includes(c.value):c.operator==="empty"?!val:true;addLog({label:node.label,status:"ok",result:`${c.column} ${c.operator} "${c.value}" → ${match?"YES ✓":"NO ✗"}`});const port=match?"yes":"no";edges.filter(e=>e.from===node.id&&e.fromPort===port).forEach(e=>{const next=nodes.find(n=>n.id===e.to);if(next)queue.push({node:next,ctx:{...ctx}});});}
+      else if(node.type==="action"){const t0=Date.now();addLog({label:node.label,status:"running",result:"Calling monday.com API…"});try{const result=await execActionBrowser(node,ctx,mondayToken,anthropicKey);const ms=Date.now()-t0;log[log.length-1]={label:node.label,status:result.ok?"ok":"error",result:result.result,ms,simulated:result.simulated};setRunLog([...log]);if(result.aiOutput)ctx.aiOutput=result.aiOutput;edges.filter(e=>e.from===node.id).forEach(e=>{const next=nodes.find(n=>n.id===e.to);if(next)queue.push({node:next,ctx:{...ctx}});});}catch(e){log[log.length-1]={label:node.label,status:"error",result:e.message};setRunLog([...log]);}}
+      else if(node.type==="wait"){addLog({label:node.label,status:"skip",result:`Would wait ${node.config?.amount||1} ${node.config?.unit||"days"} (skipped)`});edges.filter(e=>e.from===node.id).forEach(e=>{const next=nodes.find(n=>n.id===e.to);if(next)queue.push({node:next,ctx:{...ctx}});});}
+    }
+    const ok=log.filter(l=>l.status==="ok").length,err=log.filter(l=>l.status==="error").length;
+    addLog({label:"Done",status:err?"error":"ok",result:`${ok} ok · ${err} errors · ${log.filter(l=>l.status==="skip").length} skipped`});
+    setRunning(false);
+  };
+
+  const selNode=nodes.find(n=>n.id===selected);
+  const connected=boards.length>0;
+  const isDirty=lastSaved!==JSON.stringify({nodes,edges,name:automationName});
+  const deployStatus=library.find(a=>a.name===automationName)?.deployStatus||"draft";
+
+  return(
+    <div style={S.root}>
+      <div style={S.topbar}>
+        <div style={S.tL}>
+          <span style={S.logo}>⬡</span>
+          <input value={automationName} onChange={e=>setAutomationName(e.target.value)} style={S.nameInput}/>
+          {isDirty&&<span title="Unsaved changes" style={{width:6,height:6,borderRadius:3,background:"#F39C12",flexShrink:0,marginLeft:-4}}/>}
+          <span style={{...S.badge,background:connected?"#2ECC7115":apiConnecting?"#3498DB15":"#6C63FF15",color:connected?"#52D98C":apiConnecting?"#5DADE2":"#9B8FFF",borderColor:connected?"#2ECC7133":apiConnecting?"#3498DB33":"#6C63FF33"}}>{apiConnecting?"connecting…":connected?`✓ ${boards.length} boards`:"not connected"}</span>
+          {deployStatus!=="draft"&&<span style={{...S.badge,background:deployStatus==="active"?"#2ECC7115":"#3498DB15",color:deployStatus==="active"?"#52D98C":"#5DADE2",borderColor:deployStatus==="active"?"#2ECC7133":"#3498DB33"}}>{deployStatus==="active"?"● live":"● deployed"}</span>}
+        </div>
+        <div style={S.tM}>
+          <button style={S.iconBtn} onClick={()=>setZoom(z=>Math.min(2.5,z*1.15))}>+</button>
+          <span style={S.zPct}>{Math.round(zoom*100)}%</span>
+          <button style={S.iconBtn} onClick={()=>setZoom(z=>Math.max(0.25,z*0.87))}>−</button>
+          <button style={{...S.iconBtn,marginLeft:5}} onClick={()=>{setPan({x:20,y:10});setZoom(0.92);}}>↺</button>
+        </div>
+        <div style={S.tR}>
+          {selNode&&panel!=="run"&&panel!=="deploy"&&<button style={S.delBtn} onClick={()=>delNode(selNode.id)}>✕ Delete</button>}
+          <button style={{...S.iconBtn,color:panel==="settings"?"#9B8FFF":"#666",borderColor:panel==="settings"?"#6C63FF55":"#252535"}} onClick={()=>setPanel(p=>p==="settings"?"palette":"settings")}>⚙</button>
+          <button style={{...S.iconBtn,color:panel==="library"?"#F5B942":"#666",borderColor:panel==="library"?"#F39C1255":"#252535"}} onClick={()=>setPanel(p=>p==="library"?"palette":"library")}>⊟ {library.length>0&&library.length}</button>
+          <button style={{...S.runBtn,opacity:running?0.5:1}} onClick={()=>{setPanel("run");if(panel!=="run")setRunLog([]);}} disabled={running}>▶ Test</button>
+          <button style={S.deployBtn} onClick={()=>setPanel(p=>p==="deploy"?"palette":"deploy")}>↑ Deploy</button>
+          <div style={{...S.tgTrack,background:isActive?"#6C63FF":"#1C1C2E"}} onClick={()=>setIsActive(a=>!a)}><div style={{...S.tgThumb,transform:isActive?"translateX(20px)":"translateX(2px)"}}/></div>
+          <span style={{fontSize:10,color:isActive?"#9B8FFF":"#444",fontFamily:"monospace"}}>{isActive?"Active":"Draft"}</span>
+          <button style={{...S.saveBtn,opacity:saving?0.5:1}} onClick={saveNew} disabled={saving}>{saving?"…":"Save"}</button>
+        </div>
+      </div>
+
+      <div style={S.body}>
+        <div style={S.sidebar}>
+          {panel==="deploy"&&<DeployPanel webhookSecret={webhookSecret} setWebhookSecret={setWebhookSecret} nodes={nodes} edges={edges} automationName={automationName} isActive={isActive} onDeploySuccess={onDeploySuccess}/>}
+          {panel==="library"&&<LibraryPanel library={library} onLoad={loadAuto} onDelete={deleteAuto} onExportAll={exportAll} onImport={importAuto} currentName={automationName} onSaveNew={saveNew} onOverwrite={overwriteExisting} saving={saving}/>}
+          {panel==="settings"&&<SettingsPanel mondayToken={mondayToken} setMondayToken={setMondayToken} anthropicKey={anthropicKey} setAnthropicKey={setAnthropicKey} boards={boards} onConnect={connectMonday} connecting={apiConnecting} connectError={connectError}/>}
+          {panel==="config"&&selNode&&(
+            <div style={S.cfgPanel}>
+              <div style={S.cfgHead}><div style={{display:"flex",alignItems:"center",gap:7}}><span style={{width:7,height:7,borderRadius:4,background:NC[selNode.type].border,display:"inline-block",flexShrink:0}}/><span style={{fontSize:9,color:NC[selNode.type].label,letterSpacing:1,textTransform:"uppercase",fontWeight:700}}>{selNode.type} · {selNode.subtype.replace(/_/g," ")}</span></div><button style={S.closeBtn} onClick={()=>setPanel("palette")}>×</button></div>
+              <div style={S.cfgLR}><label style={S.fLbl}>Label</label><input style={S.lblInp} value={selNode.label} onChange={e=>setNodes(ns=>ns.map(n=>n.id===selNode.id?{...n,label:e.target.value}:n))}/></div>
+              <div style={{height:"0.5px",background:"#181825"}}/>
+              <div style={S.cfgBody}><ConfigForm node={selNode} onChange={cfg=>updCfg(selNode.id,cfg)} boards={boards}/></div>
+              <div style={S.cfgFoot}><button style={S.delFull} onClick={()=>delNode(selNode.id)}>Remove node</button></div>
+            </div>
+          )}
+          {panel==="run"&&(
+            <div style={S.cfgPanel}>
+              <div style={S.cfgHead}><span style={{fontSize:11,color:"#52D98C",fontWeight:600}}>▶ Test Run</span><button style={S.closeBtn} onClick={()=>setPanel("palette")}>×</button></div>
+              <div style={{padding:"10px 12px",borderBottom:"0.5px solid #1A1A28"}}>
+                <div style={{fontSize:9.5,color:"#555",textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}>Simulated item context</div>
+                {[["itemName","Item name"],["itemStatus","Status"],["itemOwner","Owner"],["itemId","Item ID"]].map(([k,l])=>(
+                  <div key={k} style={{marginBottom:6}}><label style={{display:"block",fontSize:9,color:"#444",marginBottom:2}}>{l}</label><input style={{width:"100%",background:"#181825",border:"0.5px solid #2A2A3A",color:"#C8C5E8",padding:"5px 7px",borderRadius:4,fontSize:11,fontFamily:"inherit",boxSizing:"border-box"}} value={runCtx[k]||""} onChange={e=>setRunCtx(r=>({...r,[k]:e.target.value}))}/></div>
+                ))}
+                <button style={{...S.saveBtn,width:"100%",marginTop:6,background:running?"#1A2A1A":"#27AE60",opacity:running?0.5:1}} onClick={doTestRun} disabled={running}>{running?"Running…":"▶ Execute"}</button>
+                <p style={{fontSize:9,color:"#333",marginTop:5,textAlign:"center"}}>Actions call the real monday.com API · Triggers & waits are simulated</p>
+              </div>
+              <div style={{flex:1,overflowY:"auto",padding:"8px 12px"}}>
+                {runLog.length===0&&!running&&<div style={{color:"#2A2A3A",fontSize:11,textAlign:"center",paddingTop:24}}>Run log appears here</div>}
+                {runLog.map((e,i)=><LogEntry key={i} entry={e}/>)}
+              </div>
+            </div>
+          )}
+          {panel==="palette"&&(
+            <div style={S.palette}>
+              {!connected&&<div style={{margin:"10px 12px",padding:"10px",background:"#6C63FF11",border:"0.5px solid #6C63FF33",borderRadius:6,fontSize:10,color:"#9B8FFF",lineHeight:1.6}}>⚙ Connect monday.com in <span style={{textDecoration:"underline",cursor:"pointer"}} onClick={()=>setPanel("settings")}>Settings</span> to load real boards.</div>}
+              <div style={S.palTtl}>Add nodes</div>
+              {Object.entries(TEMPLATES).map(([type,items])=>(
+                <div key={type} style={{marginBottom:2}}>
+                  <div style={{...S.typeHdr,color:NC[type].label}}>{type.toUpperCase()}</div>
+                  {items.map(t=><button key={t.subtype} style={S.chip} onClick={()=>addNode(type,t.subtype,t.label)}><span style={{...S.chipIco,background:NC[type].badge+"22",color:NC[type].label}}>{t.icon}</span><div style={{flex:1,minWidth:0}}><div style={S.chipLbl}>{t.label}</div><div style={S.chipDesc}>{t.desc}</div></div></button>)}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <svg ref={svgRef} style={S.canvas} onMouseDown={onCanvasDown} onMouseMove={onMove} onMouseUp={onUp} onMouseLeave={onUp}>
+          <defs>
+            <pattern id="dots" width={20*zoom} height={20*zoom} patternUnits="userSpaceOnUse" x={pan.x%(20*zoom)} y={pan.y%(20*zoom)}><circle cx="0.8" cy="0.8" r="0.7" fill="#1C1C22"/></pattern>
+            {[["ah","#6C63FF"],["ah-no","#E91E8C"],["ah-live","#6C63FF66"]].map(([id,stroke])=>(
+              <marker key={id} id={id} viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></marker>
+            ))}
+            <filter id="glow"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+          </defs>
+          <rect width="100%" height="100%" fill={BG}/>
+          <rect width="100%" height="100%" fill="url(#dots)"/>
+          <g transform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
+            {edges.map(edge=>{
+              const fn=nodes.find(n=>n.id===edge.from),tn=nodes.find(n=>n.id===edge.to);if(!fn||!tn)return null;
+              const fp=portPos(fn,edge.fromPort),tp=portPos(tn,"in");
+              const isNo=edge.fromPort==="no",color=isNo?"#E91E8C":"#6C63FF";
+              const d=ePath(fp,tp),mx=(fp.x+tp.x)/2,my=(fp.y+tp.y)/2;
+              return(<g key={edge.id}>
+                <path d={d} fill="none" stroke="transparent" strokeWidth={14} onClick={()=>delEdge(edge.id)} style={{cursor:"pointer"}}/>
+                <path d={d} fill="none" stroke={color} strokeWidth={1.5} strokeDasharray={isNo?"6 3":"none"} markerEnd={`url(#ah${isNo?"-no":""})`} opacity={0.75}/>
+                {edge.label&&<g><rect x={mx-14} y={my-9} width={28} height={16} rx={4} fill={color+"22"} stroke={color} strokeWidth={0.5}/><text x={mx} y={my+4} textAnchor="middle" fill={color} fontSize={9} fontFamily="monospace">{edge.label}</text></g>}
+              </g>);
+            })}
+            {connecting&&(()=>{const fn=nodes.find(n=>n.id===connecting.fromId);if(!fn)return null;return <path d={ePath(portPos(fn,connecting.fromPort),{x:connecting.mx,y:connecting.my})} fill="none" stroke="#6C63FF" strokeWidth={1.5} strokeDasharray="5 3" opacity={0.4} markerEnd="url(#ah-live)"/>;})()}
+            {nodes.map(node=>{
+              const c=NC[node.type],isSel=node.id===selected;
+              const tmpl=TEMPLATES[node.type]?.find(t=>t.subtype===node.subtype);
+              const sum=nodeSummary(node,boards);
+              const hasBoard=node.type==="action"&&node.config?.board&&boards.some(b=>b.id===node.config.board);
+              return(<g key={node.id} onMouseDown={e=>onNodeDown(e,node.id)} style={{cursor:"grab"}}>
+                {isSel&&<rect x={node.x-5} y={node.y-5} width={NW+10} height={NH+10} rx={15} fill={c.border+"18"} stroke={c.border} strokeWidth={2} filter="url(#glow)"/>}
+                <rect x={node.x} y={node.y} width={NW} height={NH} rx={10} fill={c.bg} stroke={c.border+(isSel?"CC":"66")} strokeWidth={isSel?1.2:0.7}/>
+                <rect x={node.x} y={node.y+12} width={3} height={NH-24} rx={1.5} fill={c.border}/>
+                <rect x={node.x+12} y={node.y+10} width={node.type.length*6.5+10} height={13} rx={3} fill={c.badge+"25"}/>
+                <text x={node.x+16} y={node.y+20} fontSize={8} fill={c.label} fontFamily="monospace" fontWeight="700" letterSpacing="0.6">{node.type.toUpperCase()}</text>
+                {hasBoard&&<g><circle cx={node.x+NW-12} cy={node.y+13} r={4} fill="#27AE6033" stroke="#27AE60" strokeWidth={0.5}/><circle cx={node.x+NW-12} cy={node.y+13} r={2} fill="#52D98C"/></g>}
+                <text x={node.x+14} y={node.y+44} fontSize={13} fill={c.label}>{tmpl?.icon||"●"}</text>
+                <text x={node.x+32} y={node.y+44} fontSize={12} fill={c.text} fontWeight="500" fontFamily="sans-serif">{node.label.length>22?node.label.slice(0,21)+"…":node.label}</text>
+                {sum&&<text x={node.x+32} y={node.y+60} fontSize={9} fill={c.label} opacity={0.55} fontFamily="monospace">{sum.length>27?sum.slice(0,26)+"…":sum}</text>}
+                <circle cx={node.x} cy={node.y+NH/2} r={PR} fill={BG} stroke={c.border+"AA"} strokeWidth={1} onMouseUp={e=>onInUp(e,node.id)} style={{cursor:"crosshair"}}/>
+                {node.outputs?.map((port,i)=>{const py=node.y+NH/2+(node.outputs.length>1?(i===0?-10:10):0);const pc=port==="no"?"#E91E8C":c.border;return(<g key={port}><circle cx={node.x+NW} cy={py} r={PR} fill={BG} stroke={pc+"AA"} strokeWidth={1} onMouseDown={e=>onPortDown(e,node.id,port)} style={{cursor:"crosshair"}}/>{node.outputs.length>1&&<text x={node.x+NW+9} y={py+4} fontSize={8} fill={pc} fontFamily="monospace">{port}</text>}</g>);})}
+              </g>);
+            })}
+          </g>
+        </svg>
+      </div>
+
+      <div style={S.bot}>
+        <span style={S.hint}>Click node to configure · Drag ports to connect · Click edge to delete · Scroll to zoom</span>
+        <span style={S.stats}>{nodes.length} nodes · {edges.length} edges{connected?` · ${boards.length} boards`:""}</span>
+      </div>
+    </div>
+  );
+}
+
+const S={
+  root:{display:"flex",flexDirection:"column",height:"100vh",background:BG,color:"#E8E6FF",fontFamily:"'DM Mono','Fira Code',monospace",overflow:"hidden"},
+  topbar:{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 14px",height:46,background:"#111118",borderBottom:"0.5px solid #1E1E28",flexShrink:0},
+  tL:{display:"flex",alignItems:"center",gap:9},tM:{display:"flex",alignItems:"center",gap:5},tR:{display:"flex",alignItems:"center",gap:8},
+  logo:{fontSize:18,color:"#6C63FF"},
+  nameInput:{background:"transparent",border:"none",color:"#E8E6FF",fontSize:13,fontWeight:500,fontFamily:"inherit",outline:"none",minWidth:160},
+  badge:{fontSize:9,padding:"2px 8px",borderRadius:4,fontFamily:"monospace",letterSpacing:0.5,border:"0.5px solid",transition:"all 0.4s"},
+  iconBtn:{background:"#161622",border:"0.5px solid #252535",color:"#666",fontSize:12,padding:"3px 9px",borderRadius:4,cursor:"pointer",fontFamily:"inherit"},
+  zPct:{fontSize:10,color:"#444",minWidth:34,textAlign:"center"},
+  runBtn:{background:"#27AE6018",color:"#52D98C",border:"0.5px solid #27AE6055",padding:"5px 10px",borderRadius:5,cursor:"pointer",fontSize:11,fontFamily:"inherit",fontWeight:600},
+  deployBtn:{background:"#3498DB18",color:"#5DADE2",border:"0.5px solid #3498DB55",padding:"5px 10px",borderRadius:5,cursor:"pointer",fontSize:11,fontFamily:"inherit",fontWeight:600},
+  tgTrack:{width:40,height:21,borderRadius:11,cursor:"pointer",position:"relative",transition:"background .2s",flexShrink:0},
+  tgThumb:{position:"absolute",top:2,width:17,height:17,borderRadius:9,background:"#fff",transition:"transform .2s"},
+  saveBtn:{background:"#6C63FF",color:"#fff",border:"none",padding:"5px 13px",borderRadius:5,cursor:"pointer",fontSize:11,fontFamily:"inherit",fontWeight:600},
+  delBtn:{background:"transparent",color:"#E91E8C88",border:"0.5px solid #E91E8C33",padding:"4px 9px",borderRadius:4,cursor:"pointer",fontSize:10,fontFamily:"inherit"},
+  body:{display:"flex",flex:1,overflow:"hidden"},
+  sidebar:{width:238,background:"#111118",borderRight:"0.5px solid #1E1E28",display:"flex",flexDirection:"column",flexShrink:0,overflow:"hidden"},
+  palette:{overflowY:"auto",padding:"6px 0",flex:1},
+  palTtl:{fontSize:9,color:"#2E2E3E",letterSpacing:1.5,textTransform:"uppercase",padding:"8px 14px 4px"},
+  typeHdr:{fontSize:8,fontWeight:700,letterSpacing:1.5,padding:"9px 14px 2px",opacity:0.7},
+  chip:{display:"flex",alignItems:"flex-start",gap:8,width:"100%",padding:"7px 12px",background:"transparent",border:"none",borderBottom:"0.5px solid #181825",cursor:"pointer",textAlign:"left"},
+  chipIco:{width:23,height:23,borderRadius:5,fontSize:12,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center",marginTop:1},
+  chipLbl:{fontSize:11,color:"#C8C5E8",fontFamily:"inherit",fontWeight:500},
+  chipDesc:{fontSize:9,color:"#2E2E3E",marginTop:1,lineHeight:1.35},
+  canvas:{flex:1,display:"block",cursor:"default"},
+  bot:{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"4px 14px",background:"#111118",borderTop:"0.5px solid #1E1E28",flexShrink:0},
+  hint:{fontSize:9,color:"#222232"},stats:{fontSize:9,color:"#2A2A3A"},
+  cfgPanel:{display:"flex",flexDirection:"column",height:"100%",overflow:"hidden"},
+  cfgHead:{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 12px 8px",borderBottom:"0.5px solid #1A1A28"},
+  closeBtn:{background:"transparent",border:"none",color:"#444",fontSize:18,cursor:"pointer",lineHeight:1,fontFamily:"inherit"},
+  cfgLR:{padding:"9px 12px 7px",borderBottom:"0.5px solid #181825"},
+  fLbl:{display:"block",fontSize:9,color:"#555",marginBottom:3,letterSpacing:0.4,textTransform:"uppercase"},
+  lblInp:{width:"100%",background:"#181825",border:"0.5px solid #252535",color:"#C8C5E8",padding:"5px 8px",borderRadius:4,fontSize:12,fontFamily:"inherit",boxSizing:"border-box"},
+  cfgBody:{overflowY:"auto",padding:"12px",flex:1},
+  cfgFoot:{padding:"9px 12px",borderTop:"0.5px solid #181825"},
+  delFull:{width:"100%",background:"transparent",color:"#E91E8C66",border:"0.5px solid #E91E8C22",padding:"6px",borderRadius:4,cursor:"pointer",fontSize:11,fontFamily:"inherit"},
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
