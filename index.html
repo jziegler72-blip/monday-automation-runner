@@ -75,18 +75,18 @@ async function fetchBoardData(token) {
 }
 
 // ─── Deploy API ───────────────────────────────────────────────────────────────
-async function netlifyReq(secret, method, path, body) {
+async function netlifyReq(method, path, body) {
   const res = await fetch(`/api${path}`, {
     method,
-    headers:{ "Content-Type":"application/json", "x-automation-secret":secret },
+    headers:{ "Content-Type":"application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) { const t=await res.text(); throw new Error(`${res.status}: ${t.slice(0,100)}`); }
   return res.json();
 }
-const deployToNetlify   = (secret, auto) => netlifyReq(secret, "PUT",    `/automations/${auto.id}`, auto);
-const deleteFromNetlify = (secret, id)   => netlifyReq(secret, "DELETE", `/automations/${id}`);
-const listDeployed      = (secret)       => netlifyReq(secret, "GET",    "/automations");
+const deployToNetlify   = (auto) => netlifyReq("PUT",    `/automations/${auto.id}`, auto);
+const deleteFromNetlify = (id)   => netlifyReq("DELETE", `/automations/${id}`);
+const listDeployed      = ()     => netlifyReq("GET",    "/automations");
 
 // ─── Token resolution ─────────────────────────────────────────────────────────
 function resolveTokens(str, ctx={}) {
@@ -276,46 +276,41 @@ function ConfigForm({node,onChange,boards}){
   }
 }
 
-function DeployPanel({webhookSecret,setWebhookSecret,nodes,edges,automationName,isActive,onDeploySuccess}){
-  const [sec,setSec]=useState(webhookSecret||localStorage.getItem("webhookSecret")||"");
+function DeployPanel({nodes,edges,automationName,isActive,onDeploySuccess}){
   const [status,setStatus]=useState(null);
   const [msg,setMsg]=useState("");
   const [deployed,setDeployed]=useState([]);
   const [loadingList,setLoadingList]=useState(false);
-  const inp={width:"100%",background:"#181825",border:"0.5px solid #2A2A3A",color:"#C8C5E8",padding:"7px 9px",borderRadius:5,fontSize:12,fontFamily:"monospace",boxSizing:"border-box"};
-  const fetchDeployed=async()=>{if(!sec)return;setLoadingList(true);try{const d=await listDeployed(sec);setDeployed(d.automations||[]);}catch{setDeployed([]);}setLoadingList(false);};
-  useEffect(()=>{if(sec)fetchDeployed();},[sec]);
+  const fetchDeployed=async()=>{setLoadingList(true);try{const d=await listDeployed();setDeployed(d.automations||[]);}catch{setDeployed([]);}setLoadingList(false);};
+  useEffect(()=>{fetchDeployed();},[]);
   const deploy=async(activate)=>{
-    setWebhookSecret(sec);setStatus("deploying");setMsg("");
+    setStatus("deploying");setMsg("");
     try{
       const auto={...serializeAuto(automationName,nodes,edges,activate??isActive),deployedAt:new Date().toISOString(),deployStatus:activate?"active":"deployed"};
-      await deployToNetlify(sec,auto);
+      await deployToNetlify(auto);
       setStatus("ok");setMsg(`Deployed "${automationName}"`);
       onDeploySuccess(auto);await fetchDeployed();
     }catch(e){setStatus("error");setMsg(e.message);}
   };
-  const undeploy=async(id)=>{try{await deleteFromNetlify(sec,id);await fetchDeployed();}catch(e){setMsg(e.message);}};
+  const undeploy=async(id)=>{try{await deleteFromNetlify(id);await fetchDeployed();}catch(e){setMsg(e.message);}};
   const sc=status==="ok"?"#52D98C":status==="error"?"#E74C3C":"#5DADE2";
   const fmt=iso=>new Date(iso).toLocaleDateString(undefined,{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"});
   return(
     <div style={{display:"flex",flexDirection:"column",height:"100%",overflow:"hidden"}}>
       <div style={{padding:"10px 12px 8px",borderBottom:"0.5px solid #1A1A28"}}><span style={{fontSize:10,color:"#52D98C",letterSpacing:1,textTransform:"uppercase",fontWeight:700}}>⬡ Deploy</span></div>
       <div style={{overflowY:"auto",flex:1,padding:"12px"}}>
-        <div style={{marginBottom:14}}><label style={{display:"block",fontSize:9.5,color:"#F5B942",marginBottom:3,letterSpacing:0.4,textTransform:"uppercase"}}>Webhook Secret</label><input type="password" style={inp} value={sec} onChange={e=>setSec(e.target.value)} placeholder="your-webhook-secret"/><p style={{fontSize:9.5,color:"#444",marginTop:3,lineHeight:1.4}}>Must match WEBHOOK_SECRET in your Netlify env vars</p></div>
         <div style={{display:"flex",gap:6,marginBottom:12}}>
           <button style={{flex:1,background:"#27AE6022",color:"#52D98C",border:"0.5px solid #27AE6055",padding:"7px",borderRadius:5,cursor:"pointer",fontSize:11,fontFamily:"inherit",fontWeight:600,opacity:status==="deploying"?0.5:1}} onClick={()=>deploy(false)} disabled={status==="deploying"}>{status==="deploying"?"Deploying…":"↑ Deploy"}</button>
           <button style={{flex:1,background:"#6C63FF22",color:"#9B8FFF",border:"0.5px solid #6C63FF55",padding:"7px",borderRadius:5,cursor:"pointer",fontSize:11,fontFamily:"inherit",fontWeight:600,opacity:status==="deploying"?0.5:1}} onClick={()=>deploy(true)} disabled={status==="deploying"}>↑ Deploy + Activate</button>
         </div>
         {status&&status!=="deploying"&&<div style={{padding:"7px 10px",background:sc+"11",border:`0.5px solid ${sc}33`,borderRadius:5,fontSize:11,color:sc,marginBottom:12,wordBreak:"break-word"}}>{status==="ok"?"✓ ":"✗ "}{msg}</div>}
-        {sec&&(<>
-          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}><div style={{fontSize:9,color:"#444",letterSpacing:1,textTransform:"uppercase"}}>Deployed ({deployed.length})</div><button style={{background:"transparent",border:"none",color:"#555",fontSize:10,cursor:"pointer",fontFamily:"inherit"}} onClick={fetchDeployed}>{loadingList?"…":"↺"}</button></div>
-          {deployed.length===0&&!loadingList&&<div style={{color:"#2E2E3E",fontSize:11,textAlign:"center",padding:"10px 0"}}>None deployed yet</div>}
-          {deployed.map(auto=>(<div key={auto.id} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 0",borderBottom:"0.5px solid #181825"}}>
-            <span style={{width:6,height:6,borderRadius:3,background:auto.is_active?"#52D98C":"#555",flexShrink:0}}/>
-            <div style={{flex:1,minWidth:0}}><div style={{fontSize:11,color:"#C8C5E8",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{auto.name}</div><div style={{fontSize:9,color:"#444",fontFamily:"monospace"}}>{fmt(auto.updated_at)}</div></div>
-            <button style={{background:"transparent",border:"0.5px solid #E74C3C33",color:"#E74C3C88",padding:"2px 6px",borderRadius:3,cursor:"pointer",fontSize:9,fontFamily:"inherit"}} onClick={()=>undeploy(auto.id)}>remove</button>
-          </div>))}
-        </>)}
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}><div style={{fontSize:9,color:"#444",letterSpacing:1,textTransform:"uppercase"}}>Deployed ({deployed.length})</div><button style={{background:"transparent",border:"none",color:"#555",fontSize:10,cursor:"pointer",fontFamily:"inherit"}} onClick={fetchDeployed}>{loadingList?"…":"↺"}</button></div>
+        {deployed.length===0&&!loadingList&&<div style={{color:"#2E2E3E",fontSize:11,textAlign:"center",padding:"10px 0"}}>None deployed yet</div>}
+        {deployed.map(auto=>(<div key={auto.id} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 0",borderBottom:"0.5px solid #181825"}}>
+          <span style={{width:6,height:6,borderRadius:3,background:auto.is_active?"#52D98C":"#555",flexShrink:0}}/>
+          <div style={{flex:1,minWidth:0}}><div style={{fontSize:11,color:"#C8C5E8",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{auto.name}</div><div style={{fontSize:9,color:"#444",fontFamily:"monospace"}}>{fmt(auto.updated_at)}</div></div>
+          <button style={{background:"transparent",border:"0.5px solid #E74C3C33",color:"#E74C3C88",padding:"2px 6px",borderRadius:3,cursor:"pointer",fontSize:9,fontFamily:"inherit"}} onClick={()=>undeploy(auto.id)}>remove</button>
+        </div>))}
       </div>
     </div>
   );
@@ -423,7 +418,7 @@ function App(){
   const [boards,setBoards]=useState([]);
   const [apiConnecting,setApiConnecting]=useState(false);
   const [connectError,setConnectError]=useState("");
-  const [webhookSecret,setWebhookSecret]=useState(()=>localStorage.getItem("webhookSecret")||"");
+  const [webhookSecret,setWebhookSecret]=useState("");
   const [panel,setPanel]=useState("palette");
   const [runCtx,setRunCtx]=useState({itemName:"Project Alpha",itemStatus:"Done",itemOwner:"Alice",itemId:""});
   const [runLog,setRunLog]=useState([]);
@@ -436,7 +431,6 @@ function App(){
   // Persist tokens to localStorage on this hosted page
   useEffect(()=>{ if(mondayToken) localStorage.setItem("mondayToken",mondayToken); },[mondayToken]);
   useEffect(()=>{ if(anthropicKey) localStorage.setItem("anthropicKey",anthropicKey); },[anthropicKey]);
-  useEffect(()=>{ if(webhookSecret) localStorage.setItem("webhookSecret",webhookSecret); },[webhookSecret]);
 
   // Auto-connect if token already saved
   useEffect(()=>{ if(mondayToken&&boards.length===0) connectMonday(mondayToken); },[]);
@@ -530,7 +524,7 @@ function App(){
 
       <div style={S.body}>
         <div style={S.sidebar}>
-          {panel==="deploy"&&<DeployPanel webhookSecret={webhookSecret} setWebhookSecret={setWebhookSecret} nodes={nodes} edges={edges} automationName={automationName} isActive={isActive} onDeploySuccess={onDeploySuccess}/>}
+          {panel==="deploy"&&<DeployPanel nodes={nodes} edges={edges} automationName={automationName} isActive={isActive} onDeploySuccess={onDeploySuccess}/>}
           {panel==="library"&&<LibraryPanel library={library} onLoad={loadAuto} onDelete={deleteAuto} onExportAll={exportAll} onImport={importAuto} currentName={automationName} onSaveNew={saveNew} onOverwrite={overwriteExisting} saving={saving}/>}
           {panel==="settings"&&<SettingsPanel mondayToken={mondayToken} setMondayToken={setMondayToken} anthropicKey={anthropicKey} setAnthropicKey={setAnthropicKey} boards={boards} onConnect={connectMonday} connecting={apiConnecting} connectError={connectError}/>}
           {panel==="config"&&selNode&&(

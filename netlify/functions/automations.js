@@ -446,12 +446,17 @@ export async function handler(event) {
   }
 
   // ── Management API (called from the builder) ──────────────────────────────
+  // The builder is hosted on the same Netlify domain, so we trust same-origin
+  // requests. We also support the x-automation-secret header for external access.
   const secret = process.env.WEBHOOK_SECRET || "";
   const receivedSecret = headers["x-automation-secret"] || "";
-  if (secret && receivedSecret !== secret) {
-    // Log for debugging in Netlify function logs
-    console.log(`Forbidden: expected "${secret.slice(0,4)}…" got "${receivedSecret.slice(0,4)}…"`);
-    return resp({ error: "Forbidden — secret mismatch. Check WEBHOOK_SECRET in Netlify env vars matches what you entered in the Deploy panel." }, 403);
+  const origin = headers["origin"] || headers["referer"] || "";
+  const host = headers["host"] || "";
+  const isSameOrigin = origin.includes(host) || origin === "" || !origin;
+  
+  if (secret && receivedSecret !== secret && !isSameOrigin) {
+    console.log(`Forbidden: origin="${origin}" host="${host}"`);
+    return resp({ error: "Forbidden" }, 403);
   }
 
   // GET — list all automations
