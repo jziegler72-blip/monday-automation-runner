@@ -345,7 +345,7 @@ const TEMPLATES = {
 const DEF_CFG={
   status_change:{board:"",column:"",toValue:""},item_created:{board:""},
   date_reached:{board:"",column:"",offset:"0"},column_changed:{board:"",column:""},
-  if_else:{board:"",column:"",operator:"equals",value:""},filter:{board:"",column:"",operator:"equals",value:""},
+  if_else:{board:"",column:"",operator:"equals",value:"",compareMode:"fixed",compareColumn:""},filter:{board:"",column:"",operator:"equals",value:"",compareMode:"fixed",compareColumn:""},
   notify:{who:"assignee",message:""},change_col:{board:"",column:"",toValue:""},
   create_item:{board:"",group:"",itemName:"{{item.name}}"},create_group:{board:"",groupName:"Completed — {{item.name}}"},
   move_item:{board:"",group:""},http_request:{method:"POST",url:"",body:'{"item":"{{item.name}}"}'},
@@ -390,7 +390,7 @@ function nodeSummary(node, boards) {
   switch(node.subtype){
     case"status_change": return c.toValue?`${bn} → "${c.toValue}"`:bn||"Select a board";
     case"item_created":  return bn||"Select a board";
-    case"if_else":       return c.value?`${c.column} ${c.operator} "${c.value}"`:c.column||"Configure condition";
+    case"if_else":       return c.column?(c.compareMode==="column"?`${c.column} ${c.operator} ${c.compareColumn||"?"}`:c.value?`${c.column} ${c.operator} "${c.value}"`:c.column):"Configure condition";
     case"notify":        return c.who==="assignee"?"Notify item assignee":"Notify "+c.who;
     case"change_col":    return c.toValue?`Set ${c.column} → "${c.toValue}"`:c.column||"Configure column";
     case"create_item":   return bn?`Create item on ${bn}`:bn||"Select a board";
@@ -636,34 +636,96 @@ function ConfigForm({node,onChange,boards,workspaces}) {
     case"column_changed":return<><CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Watch board"/><CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Column"/><p className="hint">Fires whenever this column changes to any value.</p></>;
     case"if_else":return<>
       <CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Check board"/>
-      <CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Column"/>
+      <CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Column to check"/>
       <CfgOSel value={c.operator||"equals"} onChange={v=>set("operator",v)}/>
-      {c.operator!=="empty"&&c.operator!=="not_empty"&&(
-        <CfgVSel col={col} value={c.value||""} onChange={v=>set("value",v)} label={c.operator==="between"?"From value":"Value"}/>
-      )}
-      {c.operator==="between"&&(
+      {c.operator!=="empty"&&c.operator!=="not_empty"&&(<>
+        {/* Compare mode toggle */}
         <div className="field-row">
-          <label className="field-label">To value</label>
-          <input className="field-input" type="number" value={c.valueTo||""} onChange={e=>set("valueTo",e.target.value)} placeholder="Upper bound…"/>
+          <label className="field-label">Compare against</label>
+          <div style={{display:"flex",gap:6}}>
+            {[["fixed","A fixed value"],["column","Another column"]].map(([mode,label])=>(
+              <button key={mode} type="button"
+                style={{flex:1,padding:"7px 10px",borderRadius:6,fontSize:12,fontWeight:600,cursor:"pointer",
+                  border:`1.5px solid ${(c.compareMode||"fixed")===mode?"var(--monday-purple)":"var(--gray-200)"}`,
+                  background:(c.compareMode||"fixed")===mode?"var(--monday-purple-light)":"white",
+                  color:(c.compareMode||"fixed")===mode?"var(--monday-purple)":"var(--gray-500)"}}
+                onClick={()=>set("compareMode",mode)}>{label}</button>
+            ))}
+          </div>
         </div>
-      )}
+        {/* Fixed value */}
+        {(c.compareMode||"fixed")==="fixed"&&c.operator!=="between"&&(
+          <CfgVSel col={col} value={c.value||""} onChange={v=>set("value",v)} label="Value"/>
+        )}
+        {/* Between needs two fixed values */}
+        {(c.compareMode||"fixed")==="fixed"&&c.operator==="between"&&(<>
+          <CfgVSel col={col} value={c.value||""} onChange={v=>set("value",v)} label="From value"/>
+          <div className="field-row">
+            <label className="field-label">To value</label>
+            <input className="field-input" type="number" value={c.valueTo||""} onChange={e=>set("valueTo",e.target.value)} placeholder="Upper bound…"/>
+          </div>
+        </>)}
+        {/* Column comparison */}
+        {c.compareMode==="column"&&(
+          <div className="field-row">
+            <label className="field-label">Compare to column</label>
+            <select className="field-input" value={c.compareColumn||""} onChange={e=>set("compareColumn",e.target.value)}>
+              <option value="">Select a column…</option>
+              {cols.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}
+            </select>
+            <p className="hint">The condition reads the live value of both columns at runtime and compares them. Works with formula, number, and text columns.</p>
+          </div>
+        )}
+        {/* Live preview */}
+        {c.column&&c.operator&&(c.compareMode==="column"?c.compareColumn:c.value)&&(
+          <div style={{padding:"8px 12px",background:"var(--gray-50)",borderRadius:6,fontSize:12,color:"var(--gray-500)",marginBottom:10}}>
+            If <strong style={{color:"var(--gray-700)"}}>{cols.find(x=>x.id===c.column)?.name||c.column}</strong> {c.operator.replace(/_/g," ")} {c.compareMode==="column"?<strong style={{color:"var(--gray-700)"}}>{cols.find(x=>x.id===c.compareColumn)?.name||c.compareColumn}</strong>:<strong style={{color:"var(--gray-700)"}}>{c.value}</strong>}
+          </div>
+        )}
+      </>)}
       <div style={{padding:"10px 12px",background:"var(--monday-purple-light)",borderRadius:6,fontSize:13,marginBottom:12}}>
         <strong style={{color:"var(--monday-purple)"}}>Yes</strong> path fires if true — <strong style={{color:"var(--monday-red)"}}>No</strong> path fires if false.
       </div>
     </>;
     case"filter":return<>
       <CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Check board"/>
-      <CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Column"/>
+      <CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Column to check"/>
       <CfgOSel value={c.operator||"equals"} onChange={v=>set("operator",v)}/>
-      {c.operator!=="empty"&&c.operator!=="not_empty"&&(
-        <CfgVSel col={col} value={c.value||""} onChange={v=>set("value",v)} label={c.operator==="between"?"From value":"Value"}/>
-      )}
-      {c.operator==="between"&&(
+      {c.operator!=="empty"&&c.operator!=="not_empty"&&(<>
         <div className="field-row">
-          <label className="field-label">To value</label>
-          <input className="field-input" type="number" value={c.valueTo||""} onChange={e=>set("valueTo",e.target.value)} placeholder="Upper bound…"/>
+          <label className="field-label">Compare against</label>
+          <div style={{display:"flex",gap:6}}>
+            {[["fixed","A fixed value"],["column","Another column"]].map(([mode,label])=>(
+              <button key={mode} type="button"
+                style={{flex:1,padding:"7px 10px",borderRadius:6,fontSize:12,fontWeight:600,cursor:"pointer",
+                  border:`1.5px solid ${(c.compareMode||"fixed")===mode?"var(--monday-purple)":"var(--gray-200)"}`,
+                  background:(c.compareMode||"fixed")===mode?"var(--monday-purple-light)":"white",
+                  color:(c.compareMode||"fixed")===mode?"var(--monday-purple)":"var(--gray-500)"}}
+                onClick={()=>set("compareMode",mode)}>{label}</button>
+            ))}
+          </div>
         </div>
-      )}
+        {(c.compareMode||"fixed")==="fixed"&&c.operator!=="between"&&(
+          <CfgVSel col={col} value={c.value||""} onChange={v=>set("value",v)} label="Value"/>
+        )}
+        {(c.compareMode||"fixed")==="fixed"&&c.operator==="between"&&(<>
+          <CfgVSel col={col} value={c.value||""} onChange={v=>set("value",v)} label="From value"/>
+          <div className="field-row">
+            <label className="field-label">To value</label>
+            <input className="field-input" type="number" value={c.valueTo||""} onChange={e=>set("valueTo",e.target.value)} placeholder="Upper bound…"/>
+          </div>
+        </>)}
+        {c.compareMode==="column"&&(
+          <div className="field-row">
+            <label className="field-label">Compare to column</label>
+            <select className="field-input" value={c.compareColumn||""} onChange={e=>set("compareColumn",e.target.value)}>
+              <option value="">Select a column…</option>
+              {cols.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}
+            </select>
+            <p className="hint">Reads the live value of both columns at runtime. Works with formula, number, and text columns.</p>
+          </div>
+        )}
+      </>)}
       <p className="hint">Execution stops here if the condition is false.</p>
     </>;
     case"notify":return<>

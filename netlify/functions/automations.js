@@ -175,29 +175,37 @@ function triggerMatches(trigger, ctx) {
 function evalCondition(node, ctx) {
   const c = node.config || {};
 
-  // Get the value to compare — prefer the specific column's live value if available
-  // Falls back to itemStatus (which is the webhook-triggered column's value)
+  // Get the value of the column being checked
   const rawVal = (c.column && ctx.columnValues?.[c.column])
     ? ctx.columnValues[c.column]
     : ctx.itemStatus;
 
-  const val  = String(rawVal || "");
+  const val = String(rawVal || "");
 
-  // Strip non-numeric characters (%, $, commas, spaces) for numeric comparisons
-  const numStr = val.replace(/[^0-9.\-]/g, "");
-  const cNumStr = String(c.value || "").replace(/[^0-9.\-]/g, "");
-  const num  = parseFloat(numStr);
-  const cNum = parseFloat(cNumStr);
+  // Determine the comparison value —
+  // "column" mode: read the live value of another column
+  // "fixed" mode (default): use the configured value string
+  let compareVal;
+  if (c.compareMode === "column" && c.compareColumn) {
+    compareVal = String(ctx.columnValues?.[c.compareColumn] || "");
+    console.log(`Column-vs-column: ${c.column}="${val}" vs ${c.compareColumn}="${compareVal}"`);
+  } else {
+    compareVal = String(c.value || "");
+  }
+
+  // Strip non-numeric chars for numeric comparisons
+  const num   = parseFloat(val.replace(/[^0-9.\-]/g, ""));
+  const cNum  = parseFloat(compareVal.replace(/[^0-9.\-]/g, ""));
   const cNum2 = parseFloat(String(c.valueTo || "").replace(/[^0-9.\-]/g, ""));
 
-  console.log(`Condition eval: column=${c.column} rawVal="${rawVal}" numericVal=${num} operator=${c.operator} compare=${cNum} compareTo=${cNum2}`);
+  console.log(`Condition eval: column=${c.column} val="${val}"(${num}) op=${c.operator} compare="${compareVal}"(${cNum})`);
 
   switch (c.operator) {
-    case "equals":                return val === c.value                    ? "yes" : "no";
-    case "not_equals":            return val !== c.value                    ? "yes" : "no";
-    case "contains":              return val.includes(c.value)              ? "yes" : "no";
-    case "not_contains":          return !val.includes(c.value)             ? "yes" : "no";
-    case "starts_with":           return val.startsWith(c.value)           ? "yes" : "no";
+    case "equals":                return val === compareVal                 ? "yes" : "no";
+    case "not_equals":            return val !== compareVal                 ? "yes" : "no";
+    case "contains":              return val.includes(compareVal)           ? "yes" : "no";
+    case "not_contains":          return !val.includes(compareVal)          ? "yes" : "no";
+    case "starts_with":           return val.startsWith(compareVal)         ? "yes" : "no";
     case "greater_than":          return num > cNum                         ? "yes" : "no";
     case "greater_than_or_equal": return num >= cNum                        ? "yes" : "no";
     case "less_than":             return num < cNum                         ? "yes" : "no";
