@@ -573,11 +573,26 @@ function CfgOSel({value,onChange}) {
     <div className="field-row">
       <label className="field-label">Operator</label>
       <select className="field-input" value={value||"equals"} onChange={e=>onChange(e.target.value)}>
-        <option value="equals">equals</option>
-        <option value="not_equals">does not equal</option>
-        <option value="contains">contains</option>
-        <option value="empty">is empty</option>
-        <option value="not_empty">is not empty</option>
+        <optgroup label="Equality">
+          <option value="equals">equals</option>
+          <option value="not_equals">does not equal</option>
+        </optgroup>
+        <optgroup label="Comparison (numbers)">
+          <option value="greater_than">greater than</option>
+          <option value="greater_than_or_equal">greater than or equal to</option>
+          <option value="less_than">less than</option>
+          <option value="less_than_or_equal">less than or equal to</option>
+          <option value="between">between (use two values below)</option>
+        </optgroup>
+        <optgroup label="Text">
+          <option value="contains">contains</option>
+          <option value="not_contains">does not contain</option>
+          <option value="starts_with">starts with</option>
+        </optgroup>
+        <optgroup label="Presence">
+          <option value="empty">is empty</option>
+          <option value="not_empty">is not empty</option>
+        </optgroup>
       </select>
     </div>
   );
@@ -619,8 +634,38 @@ function ConfigForm({node,onChange,boards,workspaces}) {
     case"item_created":return<><CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Watch board"/><p className="hint">Fires when any new item is created on this board.</p></>;
     case"date_reached":return<><CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Watch board"/><CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Date column" flt={x=>x.type==="date"}/><div className="field-row"><label className="field-label">Offset (days before/after)</label><input className="field-input" type="number" value={c.offset||"0"} onChange={e=>set("offset",e.target.value)}/><p className="hint">0 = on the date. Negative = before, positive = after.</p></div></>;
     case"column_changed":return<><CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Watch board"/><CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Column"/><p className="hint">Fires whenever this column changes to any value.</p></>;
-    case"if_else":return<><CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Check board"/><CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Column"/><CfgOSel value={c.operator||"equals"} onChange={v=>set("operator",v)}/>{c.operator!=="empty"&&c.operator!=="not_empty"&&<CfgVSel col={col} value={c.value||""} onChange={v=>set("value",v)} label="Value"/>}<div style={{padding:"10px 12px",background:"var(--monday-purple-light)",borderRadius:6,fontSize:13,marginBottom:12}}><strong style={{color:"var(--monday-purple)"}}>Yes</strong> path fires if true — <strong style={{color:"var(--monday-red)"}}>No</strong> path fires if false.</div></>;
-    case"filter":return<><CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Check board"/><CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Column"/><CfgOSel value={c.operator||"equals"} onChange={v=>set("operator",v)}/>{c.operator!=="empty"&&<CfgVSel col={col} value={c.value||""} onChange={v=>set("value",v)} label="Value"/>}<p className="hint">Execution stops here if the condition is false.</p></>;
+    case"if_else":return<>
+      <CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Check board"/>
+      <CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Column"/>
+      <CfgOSel value={c.operator||"equals"} onChange={v=>set("operator",v)}/>
+      {c.operator!=="empty"&&c.operator!=="not_empty"&&(
+        <CfgVSel col={col} value={c.value||""} onChange={v=>set("value",v)} label={c.operator==="between"?"From value":"Value"}/>
+      )}
+      {c.operator==="between"&&(
+        <div className="field-row">
+          <label className="field-label">To value</label>
+          <input className="field-input" type="number" value={c.valueTo||""} onChange={e=>set("valueTo",e.target.value)} placeholder="Upper bound…"/>
+        </div>
+      )}
+      <div style={{padding:"10px 12px",background:"var(--monday-purple-light)",borderRadius:6,fontSize:13,marginBottom:12}}>
+        <strong style={{color:"var(--monday-purple)"}}>Yes</strong> path fires if true — <strong style={{color:"var(--monday-red)"}}>No</strong> path fires if false.
+      </div>
+    </>;
+    case"filter":return<>
+      <CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Check board"/>
+      <CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Column"/>
+      <CfgOSel value={c.operator||"equals"} onChange={v=>set("operator",v)}/>
+      {c.operator!=="empty"&&c.operator!=="not_empty"&&(
+        <CfgVSel col={col} value={c.value||""} onChange={v=>set("value",v)} label={c.operator==="between"?"From value":"Value"}/>
+      )}
+      {c.operator==="between"&&(
+        <div className="field-row">
+          <label className="field-label">To value</label>
+          <input className="field-input" type="number" value={c.valueTo||""} onChange={e=>set("valueTo",e.target.value)} placeholder="Upper bound…"/>
+        </div>
+      )}
+      <p className="hint">Execution stops here if the condition is false.</p>
+    </>;
     case"notify":return<>
       <div className="field-row"><label className="field-label">Notify who</label>
         <select className="field-input" value={c.who||"assignee"} onChange={e=>set("who",e.target.value)}>

@@ -170,13 +170,22 @@ function triggerMatches(trigger, ctx) {
 function evalCondition(node, ctx) {
   const c   = node.config || {};
   const val = ctx.itemStatus;
+  const num = parseFloat(val);
+  const cNum = parseFloat(c.value);
   switch (c.operator) {
-    case "equals":     return val === c.value             ? "yes" : "no";
-    case "not_equals": return val !== c.value             ? "yes" : "no";
-    case "contains":   return (val||"").includes(c.value) ? "yes" : "no";
-    case "empty":      return !val                        ? "yes" : "no";
-    case "not_empty":  return !!val                       ? "yes" : "no";
-    default:           return "yes";
+    case "equals":              return val === c.value                          ? "yes" : "no";
+    case "not_equals":          return val !== c.value                          ? "yes" : "no";
+    case "contains":            return (val||"").includes(c.value)              ? "yes" : "no";
+    case "not_contains":        return !(val||"").includes(c.value)             ? "yes" : "no";
+    case "starts_with":         return (val||"").startsWith(c.value)           ? "yes" : "no";
+    case "greater_than":        return num > cNum                               ? "yes" : "no";
+    case "greater_than_or_equal": return num >= cNum                            ? "yes" : "no";
+    case "less_than":           return num < cNum                               ? "yes" : "no";
+    case "less_than_or_equal":  return num <= cNum                              ? "yes" : "no";
+    case "between":             return num >= cNum && num <= parseFloat(c.valueTo) ? "yes" : "no";
+    case "empty":               return !val                                     ? "yes" : "no";
+    case "not_empty":           return !!val                                    ? "yes" : "no";
+    default:                    return "yes";
   }
 }
 
