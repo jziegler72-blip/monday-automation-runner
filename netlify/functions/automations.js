@@ -140,6 +140,11 @@ async function registerWebhooks(auto, siteUrl) {
 // ─── Trigger matching ─────────────────────────────────────────────────────────
 function triggerMatches(trigger, ctx) {
   const c = trigger.config || {};
+  console.log("Checking trigger match:", JSON.stringify({
+    triggerBoard: c.board, ctxBoard: ctx.boardId,
+    triggerColumn: c.column, ctxColumn: ctx.columnId,
+    triggerValue: c.toValue, ctxValue: ctx.newValue,
+  }));
   switch (trigger.subtype) {
     case "status_change":
       return String(c.board) === ctx.boardId
@@ -390,16 +395,27 @@ export async function handler(event) {
     const ev = body.event;
     if (!ev) return resp({ ok: true });
 
+    // Log the full event for debugging
+    console.log("Webhook event received:", JSON.stringify({
+      boardId: ev.boardId,
+      itemId: ev.pulseId || ev.itemId,
+      columnId: ev.columnId,
+      value: ev.value,
+      previousValue: ev.previousValue,
+    }));
+
     const ctx = {
       boardId:    String(ev.boardId || ""),
       itemId:     String(ev.pulseId || ev.itemId || ""),
       itemName:   ev.pulseName || ev.itemName || "",
       columnId:   ev.columnId || "",
-      newValue:   ev.value?.label?.text || (typeof ev.value === "string" ? ev.value : "") || "",
-      itemStatus: ev.value?.label?.text || "",
+      newValue:   ev.value?.label?.text || ev.value?.name || (typeof ev.value === "string" ? ev.value : "") || "",
+      itemStatus: ev.value?.label?.text || ev.value?.name || "",
       userId:     String(ev.userId || ""),
       aiOutput:   "",
     };
+
+    console.log("Parsed ctx:", JSON.stringify(ctx));
 
     // Find matching active automations and run them
     const all     = await dbGetActive();
