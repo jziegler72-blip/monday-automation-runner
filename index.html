@@ -224,6 +224,7 @@ const NODE_TYPES = {
   action:    { color:"#ff9900", light:"#fff4e0", label:"Action",    icon:"▶" },
   wait:      { color:"#0073ea", light:"#e6f2ff", label:"Wait",      icon:"◷" },
   loop:      { color:"#e2445c", light:"#fdedf0", label:"Loop",      icon:"↺" },
+  formula:   { color:"#00d3d0", light:"#e0fafa", label:"Formula",   icon:"∑" },
 };
 
 const PROXY = "/api/monday";
@@ -300,6 +301,11 @@ async function execActionBrowser(node, ctx, token, anthropicKey) {
     case"http_request":{const url=resolveTokens(c.url||"",ctx);if(!url)return{ok:false,result:"No URL configured"};try{const res=await fetch(url,{method:c.method||"POST",headers:{"Content-Type":"application/json"},body:resolveTokens(c.body||"{}",ctx)});return{ok:res.ok,result:`${c.method} → ${res.status}`};}catch(e){return{ok:false,result:e.message};}}
     case"ai_step":{if(!anthropicKey)return{ok:false,result:"No Anthropic key in Settings"};const prompt=resolveTokens(c.prompt||"",ctx);const res=await fetch(ANTHROPIC_API,{method:"POST",headers:{"Content-Type":"application/json","x-api-key":anthropicKey,"anthropic-version":"2023-06-01"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:500,messages:[{role:"user",content:prompt}]})});const data=await res.json();const output=data.content?.[0]?.text||"";return{ok:true,result:output.slice(0,200),aiOutput:output};}
     case"notify":return{ok:true,result:`Notify ${c.who||"assignee"}: "${resolveTokens(c.message||"",ctx).slice(0,60)}"`,simulated:true};
+    case"formula_math":
+    case"formula_pct":
+    case"formula_if":
+    case"formula_concat":
+      return{ok:false,result:"Formula nodes require the Netlify runner to read live column values. Deploy and activate to run.",simulated:true};
     default:return{ok:false,result:`No executor for "${node.subtype}"`};
   }
 }
@@ -324,6 +330,12 @@ const TEMPLATES = {
     {subtype:"move_item",   label:"Move item",         desc:"Move an item to another group"},
     {subtype:"http_request",label:"HTTP request",      desc:"Call a webhook or external API"},
   ],
+  formula:[
+    {subtype:"formula_math",  label:"Math formula",   desc:"Add, subtract, multiply, divide columns"},
+    {subtype:"formula_pct",   label:"Percentage",     desc:"Calculate a percentage between two values"},
+    {subtype:"formula_if",    label:"IF condition",   desc:"If A > B write X, otherwise write Y"},
+    {subtype:"formula_concat",label:"Combine text",   desc:"Join column values into one text field"},
+  ],
   wait:[
     {subtype:"wait_time", label:"Wait",           desc:"Pause for a set amount of time"},
     {subtype:"wait_event",label:"Wait for event", desc:"Pause until a condition is met"},
@@ -339,6 +351,10 @@ const DEF_CFG={
   move_item:{board:"",group:""},http_request:{method:"POST",url:"",body:'{"item":"{{item.name}}"}'},
   ai_step:{prompt:"Summarize {{item.name}} and suggest next steps."},
   wait_time:{amount:"1",unit:"business days"},wait_event:{board:"",column:"",operator:"equals",value:""},
+  formula_math:  {board:"",colA:"",operator:"+",colB:"",resultCol:"",resultBoard:""},
+  formula_pct:   {board:"",colA:"",colB:"",resultCol:"",resultBoard:""},
+  formula_if:    {board:"",colA:"",operator:">",colB:"",trueVal:"",falseVal:"",resultCol:"",resultBoard:""},
+  formula_concat:{board:"",cols:[],separator:" ",resultCol:"",resultBoard:""},
 };
 
 const NW=240, NH=80, PR=7;
@@ -383,6 +399,10 @@ function nodeSummary(node, boards) {
     case"http_request":  return c.url?(c.method||"POST")+" "+c.url.replace(/https?:\/\//,"").slice(0,22):"Enter a URL";
     case"ai_step":       return c.prompt?c.prompt.slice(0,28)+"…":"Enter a prompt";
     case"wait_time":     return `Wait ${c.amount||1} ${c.unit||"business days"}`;
+    case"formula_math":  return c.colA&&c.colB?`${c.colA} ${c.operator||"+"} ${c.colB} → ${c.resultCol||"?"}`:c.board||"Configure formula";
+    case"formula_pct":   return c.colA&&c.colB?`${c.colA} ÷ ${c.colB} × 100 → ${c.resultCol||"?"}`:c.board||"Configure formula";
+    case"formula_if":    return c.colA?`IF ${c.colA} ${c.operator||">"} ${c.colB||"?"} → ${c.resultCol||"?"}`:c.board||"Configure formula";
+    case"formula_concat":return c.resultCol?`Combine → ${c.resultCol}`:c.board||"Configure formula";
     default: return "";
   }
 }
@@ -597,6 +617,110 @@ function ConfigForm({node,onChange,boards,workspaces}) {
       <p className="hint">Pauses automation for <strong>{c.amount||1} {c.unit||"business days"}</strong> before continuing. Requires Cloudflare Worker for long waits.</p>
     </>;
     case"wait_event":return<><BP label="Watch board"/><ColSel label="Column"/><OSel/>{c.operator==="equals"&&<VSel fk="value" label="Value"/>}<p className="hint">Pauses until the condition becomes true (checked every 5 minutes).</p></>;
+
+    case"formula_math":return<>
+      <BP label="Source board (where to read columns)"/>
+      {c.board&&<>
+        <div className="field-row">
+          <label className="field-label">Formula</label>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <select className="field-input" style={{flex:1}} value={c.colA||""} onChange={e=>set("colA",e.target.value)}>
+              <option value="">Column A…</option>
+              {cols.filter(x=>x.type==="numbers"||x.type==="numeric").map(x=><option key={x.id} value={x.id}>{x.name}</option>)}
+            </select>
+            <select className="field-input" style={{width:60}} value={c.operator||"+"} onChange={e=>set("operator",e.target.value)}>
+              {["+","−","×","÷"].map(op=><option key={op} value={op}>{op}</option>)}
+            </select>
+            <select className="field-input" style={{flex:1}} value={c.colB||""} onChange={e=>set("colB",e.target.value)}>
+              <option value="">Column B…</option>
+              {cols.filter(x=>x.type==="numbers"||x.type==="numeric").map(x=><option key={x.id} value={x.id}>{x.name}</option>)}
+            </select>
+          </div>
+          <p className="hint">Both columns must be number type. Result = Column A {c.operator||"+"} Column B.</p>
+        </div>
+        <ColSel label="Write result to column" flt={x=>x.type==="numbers"||x.type==="numeric"} fk="resultCol"/>
+        {c.colA&&c.colB&&c.resultCol&&<div style={{padding:"10px 12px",background:"var(--monday-teal-light)",borderRadius:6,fontSize:13,color:"var(--monday-teal)",fontWeight:500}}>
+          ∑ {cols.find(x=>x.id===c.colA)?.name||"A"} {c.operator||"+"} {cols.find(x=>x.id===c.colB)?.name||"B"} → {cols.find(x=>x.id===c.resultCol)?.name||"Result"}
+        </div>}
+      </>}
+    </>;
+
+    case"formula_pct":return<>
+      <BP label="Source board"/>
+      {c.board&&<>
+        <div className="field-row">
+          <label className="field-label">Numerator (part)</label>
+          <select className="field-input" value={c.colA||""} onChange={e=>set("colA",e.target.value)}>
+            <option value="">Select column…</option>
+            {cols.filter(x=>x.type==="numbers"||x.type==="numeric").map(x=><option key={x.id} value={x.id}>{x.name}</option>)}
+          </select>
+        </div>
+        <div className="field-row">
+          <label className="field-label">Denominator (total)</label>
+          <select className="field-input" value={c.colB||""} onChange={e=>set("colB",e.target.value)}>
+            <option value="">Select column…</option>
+            {cols.filter(x=>x.type==="numbers"||x.type==="numeric").map(x=><option key={x.id} value={x.id}>{x.name}</option>)}
+          </select>
+        </div>
+        <ColSel label="Write result % to column" flt={x=>x.type==="numbers"||x.type==="numeric"} fk="resultCol"/>
+        <p className="hint">Result = (Column A ÷ Column B) × 100. For example: 25 ÷ 100 = 25%.</p>
+      </>}
+    </>;
+
+    case"formula_if":return<>
+      <BP label="Source board"/>
+      {c.board&&<>
+        <div className="field-row">
+          <label className="field-label">Condition</label>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <select className="field-input" style={{flex:1}} value={c.colA||""} onChange={e=>set("colA",e.target.value)}>
+              <option value="">Column A…</option>
+              {cols.filter(x=>x.type==="numbers"||x.type==="numeric").map(x=><option key={x.id} value={x.id}>{x.name}</option>)}
+            </select>
+            <select className="field-input" style={{width:60}} value={c.operator||">"} onChange={e=>set("operator",e.target.value)}>
+              {[">","<","=",">=","<=","!="].map(op=><option key={op} value={op}>{op}</option>)}
+            </select>
+            <input className="field-input" style={{width:80}} type="number" value={c.colB||""} onChange={e=>set("colB",e.target.value)} placeholder="Value"/>
+          </div>
+        </div>
+        <div className="field-row">
+          <label className="field-label">If true, write</label>
+          <input className="field-input" value={c.trueVal||""} onChange={e=>set("trueVal",e.target.value)} placeholder="e.g. On Track"/>
+        </div>
+        <div className="field-row">
+          <label className="field-label">If false, write</label>
+          <input className="field-input" value={c.falseVal||""} onChange={e=>set("falseVal",e.target.value)} placeholder="e.g. Behind"/>
+        </div>
+        <ColSel label="Write result to column" fk="resultCol"/>
+      </>}
+    </>;
+
+    case"formula_concat":return<>
+      <BP label="Source board"/>
+      {c.board&&<>
+        <div className="field-row">
+          <label className="field-label">Columns to combine (in order)</label>
+          {(c.cols||[]).map((colId,i)=>(
+            <div key={i} style={{display:"flex",gap:6,marginBottom:6}}>
+              <select className="field-input" value={colId||""} onChange={e=>{const arr=[...(c.cols||[])];arr[i]=e.target.value;set("cols",arr);}}>
+                <option value="">Select column…</option>
+                {cols.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}
+              </select>
+              <button style={{background:"var(--monday-red-light)",color:"var(--monday-red)",border:"none",borderRadius:5,padding:"0 10px",cursor:"pointer",fontWeight:700,flexShrink:0}}
+                onClick={()=>{const arr=[...(c.cols||[])];arr.splice(i,1);set("cols",arr);}}>x</button>
+            </div>
+          ))}
+          <button className="btn-ghost" style={{width:"100%",fontSize:12,marginTop:2}}
+            onClick={()=>set("cols",[...(c.cols||[]),""])}>+ Add column</button>
+        </div>
+        <div className="field-row">
+          <label className="field-label">Separator between values</label>
+          <input className="field-input" value={c.separator!=null?c.separator:" "} onChange={e=>set("separator",e.target.value)} placeholder="space, comma, dash…"/>
+        </div>
+        <ColSel label="Write combined text to column" fk="resultCol"/>
+      </>}
+    </>;
+
     default:return<p style={{color:"var(--gray-300)",fontSize:13}}>No configuration needed for this node.</p>;
   }
 }
@@ -697,6 +821,251 @@ function SettingsPanel({mondayToken,setMondayToken,anthropicKey,setAnthropicKey,
       {boards.length>0&&(
         <WorkspaceTree workspaces={workspaces}/>
       )}
+    </div>
+  );
+}
+
+// ─── Read Me Panel ────────────────────────────────────────────────────────────
+function ReadMePanel() {
+  const [section,setSection]=useState("overview");
+  const sections=[
+    {key:"overview",  label:"Overview"},
+    {key:"triggers",  label:"Triggers"},
+    {key:"conditions",label:"Conditions"},
+    {key:"actions",   label:"Actions"},
+    {key:"formulas",  label:"Formulas"},
+    {key:"tokens",    label:"Tokens"},
+    {key:"deploy",    label:"Deploying"},
+    {key:"examples",  label:"Examples"},
+  ];
+  const H=({children})=><div style={{fontSize:15,fontWeight:700,color:"var(--gray-700)",marginBottom:8,marginTop:16}}>{children}</div>;
+  const P=({children})=><div style={{fontSize:13,color:"var(--gray-500)",lineHeight:1.7,marginBottom:10}}>{children}</div>;
+  const Code=({children})=><code style={{background:"var(--gray-50)",border:"1px solid var(--gray-100)",borderRadius:4,padding:"1px 6px",fontSize:12,color:"var(--monday-purple)",fontFamily:"monospace"}}>{children}</code>;
+  const Box=({color="#6161ff",light="#ebebff",icon,title,children})=>(
+    <div style={{background:light,border:`1px solid ${color}33`,borderRadius:8,padding:"12px 14px",marginBottom:10}}>
+      <div style={{fontSize:13,fontWeight:700,color:color,marginBottom:6}}>{icon} {title}</div>
+      <div style={{fontSize:13,color:"var(--gray-700)",lineHeight:1.6}}>{children}</div>
+    </div>
+  );
+  const Step=({n,children})=>(
+    <div style={{display:"flex",gap:10,marginBottom:8}}>
+      <span style={{width:22,height:22,borderRadius:11,background:"var(--monday-purple)",color:"white",
+        fontSize:11,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>{n}</span>
+      <div style={{fontSize:13,color:"var(--gray-500)",lineHeight:1.6,paddingTop:2}}>{children}</div>
+    </div>
+  );
+  const Example=({title,steps})=>(
+    <div style={{background:"white",borderRadius:8,border:"1px solid var(--gray-100)",padding:"12px 14px",marginBottom:10}}>
+      <div style={{fontSize:13,fontWeight:700,color:"var(--gray-700)",marginBottom:8}}>{title}</div>
+      {steps.map((s,i)=>(
+        <div key={i} style={{display:"flex",alignItems:"flex-start",gap:8,marginBottom:6}}>
+          <span style={{fontSize:11,fontWeight:700,color:"white",background:["#6161ff","#00c875","#ff9900","#00d3d0"][i%4],
+            borderRadius:4,padding:"1px 6px",flexShrink:0,marginTop:1}}>{["Trigger","Condition","Action","Formula"][i%4]}</span>
+          <span style={{fontSize:13,color:"var(--gray-500)"}}>{s}</span>
+        </div>
+      ))}
+    </div>
+  );
+
+  const content={
+    overview:(
+      <>
+        <H>What is the Automation Builder?</H>
+        <P>The Automation Builder lets you create powerful, multi-step automations on monday.com that go far beyond what monday's native automation center supports. Connect triggers, conditions, actions, and formulas in a visual flow — then deploy them to run live on your boards.</P>
+        <Box color="#6161ff" light="#ebebff" icon="⬡" title="How it works">
+          Build your automation on the canvas by connecting nodes. Each node is a step in the workflow. When a trigger fires in monday.com, the automation runs every node in sequence — checking conditions, executing actions, and calculating formulas.
+        </Box>
+        <H>Quick start</H>
+        <Step n="1">Connect your monday.com account in <strong>⚙ Settings</strong></Step>
+        <Step n="2">Add a <strong>Trigger</strong> node — this is what starts your automation</Step>
+        <Step n="3">Add <strong>Action</strong> or <strong>Formula</strong> nodes — these are what your automation does</Step>
+        <Step n="4">Click <strong>Save</strong> then <strong>↑ Deploy + Activate</strong></Step>
+        <Step n="5">Test it by triggering the event in monday.com — the automation runs automatically</Step>
+      </>
+    ),
+    triggers:(
+      <>
+        <H>Trigger nodes</H>
+        <P>Triggers start your automation. Every automation must have at least one trigger.</P>
+        <Box color="#6161ff" light="#ebebff" icon="⚡" title="Status changes">
+          Fires when a status column on any item changes to a specific value.<br/><br/>
+          <strong>Configure:</strong> Select the board, the status column, and the value it changes to (e.g. "Done", "Won", "Approved").
+        </Box>
+        <Box color="#6161ff" light="#ebebff" icon="⚡" title="Item created">
+          Fires whenever a new item is added to the selected board. No additional configuration needed.
+        </Box>
+        <Box color="#6161ff" light="#ebebff" icon="⚡" title="Column value changes">
+          Fires whenever a specific column changes to any value. Useful for tracking updates to any field, not just status columns.
+        </Box>
+        <Box color="#6161ff" light="#ebebff" icon="⚡" title="Date reached">
+          Fires on the date stored in a date column. Use the offset field to fire days before or after (e.g. -3 = 3 days before the date).
+        </Box>
+        <P><strong>Note:</strong> Triggers require a webhook to be registered in monday.com. This happens automatically when you deploy and activate an automation.</P>
+      </>
+    ),
+    conditions:(
+      <>
+        <H>Condition nodes</H>
+        <P>Conditions let you branch your automation based on a value. The automation takes the <strong style={{color:"var(--monday-purple)"}}>Yes</strong> path if the condition is true, or the <strong style={{color:"var(--monday-red)"}}>No</strong> path if false.</P>
+        <Box color="#00c875" light="#e6faf3" icon="◆" title="If / Else">
+          Checks a column value and routes to two different paths.<br/><br/>
+          <strong>Operators:</strong> equals · does not equal · contains · is empty · is not empty<br/><br/>
+          <strong>Example:</strong> If Priority equals "High" → Yes path creates an urgent task. No path sends a standard notification.
+        </Box>
+        <Box color="#00c875" light="#e6faf3" icon="◆" title="Filter / Gate">
+          Like If/Else but with only one path. If the condition is false, the automation stops entirely at this point. Use this to prevent unnecessary actions.
+        </Box>
+        <H>Connecting condition paths</H>
+        <P>Drag from the <strong style={{color:"var(--monday-purple)"}}>Y</strong> port on the right side of the node to connect the Yes path. Drag from the <strong style={{color:"var(--monday-red)"}}>N</strong> port to connect the No path. You can connect both, or just one.</P>
+      </>
+    ),
+    actions:(
+      <>
+        <H>Action nodes</H>
+        <P>Actions are what your automation does. You can chain multiple actions together — each one runs after the previous one completes.</P>
+        <Box color="#ff9900" light="#fff4e0" icon="▶" title="Create group">
+          Creates a new group on any board. The group name can include tokens like <Code>{"{{item.name}}"}</Code> to make it dynamic.<br/><br/>
+          <strong>Example:</strong> Create a group called "Completed — <Code>{"{{item.name}}"}</Code>" on your archive board.
+        </Box>
+        <Box color="#ff9900" light="#fff4e0" icon="▶" title="Create item">
+          Creates a new item on any board in any group. The item name supports tokens.
+        </Box>
+        <Box color="#ff9900" light="#fff4e0" icon="▶" title="Change column">
+          Sets a column on the triggering item to a specific value. For status columns, pick from a dropdown. For text/number columns, type any value.
+        </Box>
+        <Box color="#ff9900" light="#fff4e0" icon="▶" title="Move item">
+          Moves the triggering item to a different group on any board.
+        </Box>
+        <Box color="#ff9900" light="#fff4e0" icon="▶" title="Notify user">
+          Sends a bell notification in monday.com. The message supports tokens.
+        </Box>
+        <Box color="#ff9900" light="#fff4e0" icon="▶" title="HTTP request">
+          Calls any external URL (webhook, API, Zapier, Make, etc.) with a JSON body. Use tokens in the URL and body to pass live data.
+        </Box>
+      </>
+    ),
+    formulas:(
+      <>
+        <H>Formula nodes</H>
+        <P>Formula nodes read number or text values from monday.com columns, perform a calculation, and write the result back to another column — automatically, every time the automation runs.</P>
+        <Box color="#00d3d0" light="#e0fafa" icon="∑" title="Math formula">
+          Adds, subtracts, multiplies, or divides two number columns and writes the result to a third.<br/><br/>
+          <strong>Example:</strong> Column A (Revenue) + Column B (Bonus) → Column C (Total)<br/>
+          <strong>Operators:</strong> + − × ÷
+        </Box>
+        <Box color="#00d3d0" light="#e0fafa" icon="∑" title="Percentage">
+          Calculates (Column A ÷ Column B) × 100 and writes the result as a percentage.<br/><br/>
+          <strong>Example:</strong> Deals Won ÷ Total Deals × 100 → Win Rate %
+        </Box>
+        <Box color="#00d3d0" light="#e0fafa" icon="∑" title="IF condition">
+          Compares a number column against a fixed value and writes different text based on the result.<br/><br/>
+          <strong>Example:</strong> If Score {">"} 80 → write "Pass", else write "Fail"
+        </Box>
+        <Box color="#00d3d0" light="#e0fafa" icon="∑" title="Combine text">
+          Joins multiple column values into one text field with a separator.<br/><br/>
+          <strong>Example:</strong> First Name + " " + Last Name → Full Name
+        </Box>
+        <H>Chaining formulas</H>
+        <P>You can chain multiple formula nodes together to build complex calculations. Each formula writes its result to a column, and subsequent formulas can read that column as an input.</P>
+        <P><strong>Example chain:</strong> Revenue + Bonus = Total → Expenses + Tax = Costs → Total × Costs = Profit</P>
+        <P><strong>Note:</strong> Formula nodes require the Netlify runner to execute — they read live column values at the moment the automation fires. The test run panel will show them as skipped; deploy and activate to run them live.</P>
+      </>
+    ),
+    tokens:(
+      <>
+        <H>Tokens</H>
+        <P>Tokens are placeholders that get replaced with live values when your automation runs. Use them in group names, item names, notification messages, and HTTP request bodies.</P>
+        <div style={{background:"white",borderRadius:8,border:"1px solid var(--gray-100)",overflow:"hidden",marginBottom:12}}>
+          {[
+            ["{{item.name}}","The name of the item that triggered the automation","My Project"],
+            ["{{item.status}}","The new status value that triggered the automation","Done"],
+            ["{{item.owner}}","The user ID of the item's assignee","12345"],
+            ["{{item.id}}","The monday.com item ID (needed for Change Column)","9876543"],
+            ["{{today}}","Today's date in YYYY-MM-DD format","2026-05-15"],
+            ["{{ai.output}}","The response from an AI step node (if used)","Summary text…"],
+            ["{{loop.index}}","Current iteration number inside a loop node","1, 2, 3…"],
+          ].map(([token,desc,example],i)=>(
+            <div key={i} style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,padding:"10px 14px",
+              borderBottom:i<6?"1px solid var(--gray-100)":"none",alignItems:"center"}}>
+              <div>
+                <Code>{token}</Code>
+                <div style={{fontSize:12,color:"var(--gray-300)",marginTop:4}}>{desc}</div>
+              </div>
+              <div style={{fontSize:12,color:"var(--monday-green)",fontFamily:"monospace",fontWeight:500}}>→ {example}</div>
+            </div>
+          ))}
+        </div>
+        <H>Using tokens</H>
+        <P>Click the token pills in the config panel to insert them, or type them manually. They work in: group names, item names, notification messages, HTTP request URL and body.</P>
+        <P><strong>Example:</strong> Group name <Code>Completed — {"{{item.name}}"}</Code> becomes <Code>Completed — My Project</Code> when the automation runs.</P>
+      </>
+    ),
+    deploy:(
+      <>
+        <H>Deploying your automation</H>
+        <P>Building an automation in the canvas is just the first step. To make it run live in monday.com, you need to deploy it.</P>
+        <H>↑ Deploy vs ↑ Deploy + Activate</H>
+        <Box color="#0073ea" light="#e6f2ff" icon="↑" title="Deploy">
+          Saves your automation to the server but does not start it. Use this when you want to review before going live.
+        </Box>
+        <Box color="#00c875" light="#e6faf3" icon="↑" title="Deploy + Activate">
+          Saves your automation and immediately activates it. monday.com will start sending webhook events to your runner, and the automation will execute on every matching trigger.
+        </Box>
+        <H>What happens when you deploy</H>
+        <Step n="1">Your automation JSON is sent to the Netlify function and stored in Supabase</Step>
+        <Step n="2">The function registers a webhook with monday.com for each trigger node</Step>
+        <Step n="3">monday.com sends a POST to your Netlify URL whenever the trigger condition fires</Step>
+        <Step n="4">The function finds your automation, runs the graph, and executes all actions</Step>
+        <H>Updating a deployed automation</H>
+        <P>Make your changes on the canvas, then click <strong>↑ Deploy + Activate</strong> again. The existing automation in Supabase is overwritten with the new version.</P>
+        <H>Disabling an automation</H>
+        <P>Toggle the <strong>Active/Draft</strong> switch in the top bar to Draft, then redeploy. The runner will skip inactive automations even if the trigger fires.</P>
+      </>
+    ),
+    examples:(
+      <>
+        <H>Example automations</H>
+        <P>Here are some ready-to-build automations to get you started.</P>
+        <Example title="Sales deal won → Create archive group"
+          steps={["Status changes to 'Won' on Sales Pipeline board","Create group 'Closed — {{item.name}}' on Archive board"]}/>
+        <Example title="New item → Notify team + assign priority"
+          steps={["Item created on Project board","Change column: Priority → High","Notify user: Item assignee — '{{item.name}} needs your attention'"]}/>
+        <Example title="High value deal routing"
+          steps={["Status changes to 'Proposal' on CRM board","If Deal Value > 50000 → Yes path","Create item on Enterprise Deals board with name '{{item.name}}'"]}/>
+        <Example title="Calculate win rate on close"
+          steps={["Status changes to 'Won' or 'Lost'","Math formula: Won Deals + 1 → Won Deals (increment)","Percentage: Won Deals ÷ Total Deals × 100 → Win Rate %"]}/>
+        <Example title="Auto-generate client summary"
+          steps={["Status changes to 'Complete'","Combine text: Client Name + ' — ' + Project Name → Project Summary column","HTTP request: POST to Slack webhook with body {\"text\": \"{{item.name}} completed\"}"]}/>
+        <H>Tips</H>
+        <P>• <strong>Chain formula nodes</strong> for multi-step calculations — each result writes to a column the next formula can read.</P>
+        <P>• <strong>Use Filter nodes</strong> early in your flow to stop the automation before unnecessary actions run.</P>
+        <P>• <strong>Test before deploying</strong> — use the ▶ Test panel to verify your action nodes work correctly against real data.</P>
+        <P>• <strong>One automation per trigger</strong> is fine — but you can also build one complex automation with conditions that branch into many different outcomes.</P>
+      </>
+    ),
+  };
+
+  return(
+    <div style={{display:"flex",flexDirection:"column",height:"100%",overflow:"hidden"}}>
+      <div style={{padding:"16px 20px",borderBottom:"1px solid var(--gray-100)",flexShrink:0}}>
+        <div style={{fontSize:16,fontWeight:700,color:"var(--gray-700)",marginBottom:2}}>Documentation</div>
+        <div style={{fontSize:13,color:"var(--gray-300)"}}>Everything you need to build automations</div>
+      </div>
+      {/* Section nav */}
+      <div style={{display:"flex",gap:4,padding:"8px 12px",borderBottom:"1px solid var(--gray-100)",flexWrap:"wrap",flexShrink:0}}>
+        {sections.map(s=>(
+          <button key={s.key} onClick={()=>setSection(s.key)}
+            style={{padding:"4px 10px",borderRadius:20,border:"none",cursor:"pointer",fontSize:12,fontWeight:500,
+              background:section===s.key?"var(--monday-purple)":"var(--gray-50)",
+              color:section===s.key?"white":"var(--gray-500)",transition:"all 0.15s"}}>
+            {s.label}
+          </button>
+        ))}
+      </div>
+      {/* Content */}
+      <div style={{flex:1,overflowY:"auto",padding:"4px 20px 20px"}}>
+        {content[section]}
+      </div>
     </div>
   );
 }
@@ -1209,6 +1578,7 @@ function App() {
     if(panel==="library") return <LibraryPanel library={library} onLoad={loadAuto} onDelete={deleteAuto} onExportAll={exportAll} onImport={importAuto} currentName={automationName} onSaveNew={saveNew} onOverwrite={overwriteExisting} saving={saving}/>;
     if(panel==="deploy") return <DeployPanel nodes={nodes} edges={edges} automationName={automationName} isActive={isActive} onDeploySuccess={onDeploySuccess} boards={boards} mondayToken={mondayToken}/>;
     if(panel==="run") return <RunPanel nodes={nodes} edges={edges} boards={boards} mondayToken={mondayToken} anthropicKey={anthropicKey} onClose={()=>setPanel("palette")}/>;
+    if(panel==="readme") return <ReadMePanel/>;
 
     // Palette
     return(
@@ -1311,14 +1681,16 @@ function App() {
         {/* Nav buttons */}
         <div style={{display:"flex",alignItems:"center",gap:4}}>
           {[
-            {key:"settings",label:"⚙ Settings"},
-            {key:"library", label:`📋 Library${library.length>0?" ("+library.length+")":""}`},
+            {key:"settings",label:"⚙"},
+            {key:"library", label:`📋${library.length>0?" "+library.length:""}`},
+            {key:"readme",  label:"📖 Read Me"},
           ].map(b=>(
             <button key={b.key} className="btn-ghost"
-              style={{padding:"6px 12px",fontSize:13,
+              style={{padding:"6px 10px",fontSize:13,
                 background:panel===b.key?"var(--monday-purple-light)":"transparent",
                 color:panel===b.key?"var(--monday-purple)":"var(--gray-500)",
                 borderColor:panel===b.key?"rgba(97,97,255,0.3)":"var(--gray-200)"}}
+              title={b.key.charAt(0).toUpperCase()+b.key.slice(1)}
               onClick={()=>setPanel(p=>p===b.key?"palette":b.key)}>{b.label}</button>
           ))}
         </div>
