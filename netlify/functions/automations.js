@@ -285,6 +285,64 @@ async function execAction(node, ctx, token) {
         return { ok: true, result: `Notification: "${msg.slice(0, 80)}"`, simulated: true };
       }
 
+      case "formula_math":
+      case "formula_pct":
+      case "formula_if":
+      case "formula_concat": {
+        if (!ctx.itemId) return { ok: false, result: "No itemId in context — formula needs the triggering item" };
+        // Fetch the item's column values
+        const itemData = await mondayGQL(
+          `query($id:Int!){items(ids:[$id]){column_values{id text value}}}`,
+          { id: parseInt(ctx.itemId) },
+          useToken
+        );
+        const colVals = {};
+        (itemData?.items?.[0]?.column_values || []).forEach(cv => {
+          colVals[cv.id] = parseFloat(cv.text) || cv.text || 0;
+        });
+
+        let result;
+        if (node.subtype === "formula_math") {
+          const a = parseFloat(colVals[c.colA]) || 0;
+          const b = parseFloat(colVals[c.colB]) || 0;
+          result = c.operator === "+" ? a + b
+                 : c.operator === "−" ? a - b
+                 : c.operator === "×" ? a * b
+                 : c.operator === "÷" ? (b !== 0 ? a / b : 0)
+                 : a + b;
+          result = Math.round(result * 100) / 100;
+        } else if (node.subtype === "formula_pct") {
+          const a = parseFloat(colVals[c.colA]) || 0;
+          const b = parseFloat(colVals[c.colB]) || 1;
+          result = Math.round((a / b) * 10000) / 100;
+        } else if (node.subtype === "formula_if") {
+          const a = parseFloat(colVals[c.colA]) || 0;
+          const b = parseFloat(c.colB) || 0;
+          const passes = c.operator === ">" ? a > b
+                       : c.operator === "<" ? a < b
+                       : c.operator === "=" ? a === b
+                       : c.operator === ">=" ? a >= b
+                       : c.operator === "<=" ? a <= b
+                       : c.operator === "!=" ? a !== b
+                       : false;
+          result = passes ? (c.trueVal || "Yes") : (c.falseVal || "No");
+        } else if (node.subtype === "formula_concat") {
+          const sep = c.separator != null ? c.separator : " ";
+          result = (c.cols || []).map(id => String(colVals[id] || "")).join(sep).trim();
+        }
+
+        // Write result back to the target column
+        if (!c.resultCol) return { ok: false, result: "No result column configured" };
+        const isNumber = typeof result === "number";
+        const writeVal = isNumber ? JSON.stringify(result) : JSON.stringify(String(result));
+        await mondayGQL(
+          `mutation($b:Int!,$i:Int!,$c:String!,$v:JSON!){change_column_value(board_id:$b,item_id:$i,column_id:$c,value:$v){id}}`,
+          { b: parseInt(c.board || c.resultBoard || ctx.boardId), i: parseInt(ctx.itemId), c: c.resultCol, v: writeVal },
+          useToken
+        );
+        return { ok: true, result: `Formula result: ${result} → wrote to column "${c.resultCol}"` };
+      }
+
       default:
         return { ok: false, result: `Unknown action: ${node.subtype}` };
     }
