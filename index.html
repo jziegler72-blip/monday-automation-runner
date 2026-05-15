@@ -411,73 +411,190 @@ function nodeSummary(node, boards) {
 function BoardPicker({value, onChange, boards, workspaces, label="Board"}) {
   const [open,setOpen]=useState(false);
   const [search,setSearch]=useState("");
+  const [openWs,setOpenWs]=useState({});
   const ref=useRef(null);
   const selected=boards.find(b=>b.id===value);
 
+  // When a board is already selected, auto-open its workspace
   useEffect(()=>{
-    const h=e=>{ if(ref.current&&!ref.current.contains(e.target)) setOpen(false); };
+    if(value&&selected){
+      setOpenWs(o=>({...o,[selected.workspaceId||"main"]:true}));
+    }
+  },[value]);
+
+  useEffect(()=>{
+    const h=e=>{ if(ref.current&&!ref.current.contains(e.target)){setOpen(false);setSearch("");} };
     document.addEventListener("mousedown",h);
     return()=>document.removeEventListener("mousedown",h);
   },[]);
 
+  const toggleWs=(id,e)=>{ e.stopPropagation(); setOpenWs(o=>({...o,[id]:!o[id]})); };
+
+  // When searching, show all boards flat; when not, show workspace tree
+  const isSearching=search.length>0;
   const filtered=boards.filter(b=>b.name.toLowerCase().includes(search.toLowerCase()));
-  const grouped={};
-  filtered.forEach(b=>{ const k=b.workspaceId||"main"; const wn=b.workspaceName||"Main Workspace"; if(!grouped[k])grouped[k]={name:wn,boards:[]}; grouped[k].boards.push(b); });
+
+  // Build workspace groups from all boards (not just filtered, for the tree)
+  const wsGroups={};
+  boards.forEach(b=>{
+    const k=b.workspaceId||"main";
+    const wn=b.workspaceName||"Main Workspace";
+    if(!wsGroups[k])wsGroups[k]={id:k,name:wn,boards:[]};
+    wsGroups[k].boards.push(b);
+  });
 
   return(
     <div className="field-row" ref={ref} style={{position:"relative"}}>
       <label className="field-label">{label}</label>
       <button type="button" onClick={()=>setOpen(o=>!o)}
-        style={{width:"100%",padding:"8px 12px",borderRadius:6,border:"1.5px solid var(--gray-200)",
+        style={{width:"100%",padding:"8px 12px",borderRadius:6,border:`1.5px solid ${open?"var(--monday-purple)":"var(--gray-200)"}`,
           background:"white",textAlign:"left",cursor:"pointer",display:"flex",alignItems:"center",
-          justifyContent:"space-between",fontSize:14,color:selected?"var(--gray-700)":"var(--gray-300)",
-          transition:"all 0.15s"}}
-        onMouseEnter={e=>e.currentTarget.style.borderColor="var(--monday-purple)"}
-        onMouseLeave={e=>e.currentTarget.style.borderColor=open?"var(--monday-purple)":"var(--gray-200)"}>
+          justifyContent:"space-between",fontSize:14,color:selected?"var(--gray-700)":"var(--gray-300)",transition:"all 0.15s"}}>
         <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-          {selected?<><span style={{color:"var(--gray-300)",fontSize:12}}>{selected.workspaceName} / </span>{selected.name}</>:"Select a board…"}
+          {selected
+            ?<><span style={{color:"var(--gray-300)",fontSize:12}}>{selected.workspaceName} / </span>{selected.name}</>
+            :"Select a board…"}
         </span>
         <span style={{color:"var(--gray-300)",marginLeft:8,flexShrink:0}}>{open?"▲":"▼"}</span>
       </button>
       {open&&(
         <div style={{position:"absolute",top:"calc(100% + 4px)",left:0,right:0,zIndex:1000,
           background:"white",borderRadius:8,border:"1.5px solid var(--gray-200)",
-          boxShadow:"var(--shadow-lg)",maxHeight:280,overflow:"hidden",display:"flex",flexDirection:"column"}}>
-          <div style={{padding:"8px"}}>
+          boxShadow:"var(--shadow-lg)",maxHeight:320,overflow:"hidden",display:"flex",flexDirection:"column"}}>
+          {/* Search */}
+          <div style={{padding:"8px 8px 4px",borderBottom:"1px solid var(--gray-100)"}}>
             <input autoFocus className="field-input" placeholder="Search boards…" value={search}
-              onChange={e=>setSearch(e.target.value)} onClick={e=>e.stopPropagation()}
-              style={{fontSize:13}}/>
+              onChange={e=>setSearch(e.target.value)} onClick={e=>e.stopPropagation()} style={{fontSize:13}}/>
           </div>
           <div style={{overflowY:"auto",flex:1}}>
-            {Object.entries(grouped).map(([wsId,ws])=>(
-              <div key={wsId}>
-                <div style={{padding:"6px 12px",fontSize:11,fontWeight:700,color:"var(--monday-purple)",
-                  textTransform:"uppercase",letterSpacing:0.5,background:"var(--gray-50)",
-                  borderTop:"1px solid var(--gray-100)",display:"flex",alignItems:"center",gap:6}}>
-                  <span>⬡</span>{ws.name}
-                </div>
-                {ws.boards.map(b=>(
+            {isSearching
+              /* Flat search results */
+              ?filtered.length===0
+                ?<div style={{padding:16,textAlign:"center",color:"var(--gray-300)",fontSize:13}}>No boards match</div>
+                :filtered.map(b=>(
                   <div key={b.id} onClick={()=>{onChange(b.id);setOpen(false);setSearch("");}}
-                    style={{padding:"9px 12px 9px 24px",fontSize:13,cursor:"pointer",
+                    style={{padding:"9px 12px",fontSize:13,cursor:"pointer",
                       background:b.id===value?"var(--monday-purple-light)":"white",
                       color:b.id===value?"var(--monday-purple)":"var(--gray-700)",
                       fontWeight:b.id===value?600:400,
-                      borderBottom:"1px solid var(--gray-100)",display:"flex",alignItems:"center",gap:8,
-                      transition:"background 0.1s"}}
-                    onMouseEnter={e=>{ if(b.id!==value) e.currentTarget.style.background="var(--gray-50)"; }}
+                      borderBottom:"1px solid var(--gray-100)",display:"flex",alignItems:"center",gap:8}}
+                    onMouseEnter={e=>{ if(b.id!==value)e.currentTarget.style.background="var(--gray-50)"; }}
                     onMouseLeave={e=>{ e.currentTarget.style.background=b.id===value?"var(--monday-purple-light)":"white"; }}>
+                    <span style={{fontSize:11,color:"var(--gray-300)"}}>{b.workspaceName} /</span>
                     {b.id===value&&<span style={{color:"var(--monday-purple)"}}>✓</span>}
                     {b.name}
                   </div>
-                ))}
-              </div>
-            ))}
-            {filtered.length===0&&<div style={{padding:16,textAlign:"center",color:"var(--gray-300)",fontSize:13}}>No boards match</div>}
+                ))
+              /* Workspace tree (all collapsed by default) */
+              :Object.values(wsGroups).map(ws=>(
+                <div key={ws.id} style={{borderBottom:"1px solid var(--gray-100)"}}>
+                  {/* Workspace header - clickable to expand */}
+                  <div onClick={e=>toggleWs(ws.id,e)}
+                    style={{display:"flex",alignItems:"center",gap:8,padding:"9px 12px",cursor:"pointer",
+                      background:openWs[ws.id]?"var(--monday-purple-light)":"var(--gray-50)",
+                      borderBottom:openWs[ws.id]?"1px solid var(--gray-100)":"none"}}
+                    onMouseEnter={e=>{ if(!openWs[ws.id])e.currentTarget.style.background="var(--gray-100)"; }}
+                    onMouseLeave={e=>{ e.currentTarget.style.background=openWs[ws.id]?"var(--monday-purple-light)":"var(--gray-50)"; }}>
+                    <span style={{fontSize:10,color:openWs[ws.id]?"var(--monday-purple)":"var(--gray-300)",
+                      display:"inline-block",transition:"transform 0.15s",
+                      transform:openWs[ws.id]?"rotate(90deg)":"rotate(0deg)"}}>▶</span>
+                    <span style={{fontSize:13,color:"var(--monday-purple)"}}>⬡</span>
+                    <span style={{fontSize:13,fontWeight:700,color:openWs[ws.id]?"var(--monday-purple)":"var(--gray-700)",flex:1}}>{ws.name}</span>
+                    <span style={{fontSize:11,color:"var(--gray-300)",background:"var(--gray-100)",
+                      padding:"1px 6px",borderRadius:10}}>{ws.boards.length}</span>
+                  </div>
+                  {/* Boards inside workspace */}
+                  {openWs[ws.id]&&ws.boards.map(b=>(
+                    <div key={b.id} onClick={()=>{onChange(b.id);setOpen(false);setSearch("");}}
+                      style={{padding:"9px 12px 9px 28px",fontSize:13,cursor:"pointer",
+                        background:b.id===value?"var(--monday-purple-light)":"white",
+                        color:b.id===value?"var(--monday-purple)":"var(--gray-700)",
+                        fontWeight:b.id===value?600:400,
+                        borderBottom:"1px solid var(--gray-100)",display:"flex",alignItems:"center",gap:8}}
+                      onMouseEnter={e=>{ if(b.id!==value)e.currentTarget.style.background="var(--gray-50)"; }}
+                      onMouseLeave={e=>{ e.currentTarget.style.background=b.id===value?"var(--monday-purple-light)":"white"; }}>
+                      {b.id===value&&<span style={{color:"var(--monday-purple)"}}>✓</span>}
+                      {b.name}
+                    </div>
+                  ))}
+                </div>
+              ))
+            }
           </div>
         </div>
       )}
     </div>
   );
+}
+
+// ─── Standalone field components (defined outside ConfigForm to prevent focus loss) ──
+function CfgColSel({cols,value,onChange,label="Column",flt}) {
+  const list=flt?cols.filter(flt):cols;
+  return(
+    <div className="field-row">
+      <label className="field-label">{label}</label>
+      <select className="field-input" value={value||""} onChange={e=>onChange(e.target.value)}>
+        <option value="">Select a column…</option>
+        {list.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}
+      </select>
+    </div>
+  );
+}
+function CfgVSel({col,value,onChange,label="Value",fk}) {
+  if(col?.type==="color"||col?.type==="status") return(
+    <div className="field-row">
+      <label className="field-label">{label}</label>
+      <select className="field-input" value={value||""} onChange={e=>onChange(e.target.value)}>
+        <option value="">Any value</option>
+        {(col.values||[]).map(v=><option key={v} value={v}>{v}</option>)}
+      </select>
+    </div>
+  );
+  return(
+    <div className="field-row">
+      <label className="field-label">{label}</label>
+      <input className="field-input" value={value||""} onChange={e=>onChange(e.target.value)} placeholder="Enter value…"/>
+    </div>
+  );
+}
+function CfgGSel({groups,value,onChange,label="Group"}) {
+  return(
+    <div className="field-row">
+      <label className="field-label">{label}</label>
+      <select className="field-input" value={value||""} onChange={e=>onChange(e.target.value)}>
+        <option value="">Select a group…</option>
+        {groups.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}
+      </select>
+    </div>
+  );
+}
+function CfgOSel({value,onChange}) {
+  return(
+    <div className="field-row">
+      <label className="field-label">Operator</label>
+      <select className="field-input" value={value||"equals"} onChange={e=>onChange(e.target.value)}>
+        <option value="equals">equals</option>
+        <option value="not_equals">does not equal</option>
+        <option value="contains">contains</option>
+        <option value="empty">is empty</option>
+        <option value="not_empty">is not empty</option>
+      </select>
+    </div>
+  );
+}
+function CfgTokens({tokens,current,onInsert}) {
+  return(
+    <div style={{marginBottom:12}}>
+      <label className="field-label">Insert token</label>
+      <div>{tokens.map(tok=><span key={tok} className="token-pill" onClick={()=>onInsert((current||"")+" "+tok)}>{tok}</span>)}</div>
+    </div>
+  );
+}
+function CfgBP({boards,workspaces,value,onChange,label="Board"}) {
+  if(boards.length===0) return(
+    <div className="field-row"><div style={{padding:"10px 12px",background:"var(--gray-50)",borderRadius:6,fontSize:13,color:"var(--gray-300)"}}>Connect monday.com in Settings to load boards</div></div>
+  );
+  return <BoardPicker value={value||""} onChange={onChange} boards={boards} workspaces={workspaces} label={label}/>;
 }
 
 // ─── Config form ──────────────────────────────────────────────────────────────
@@ -489,73 +606,6 @@ function ConfigForm({node,onChange,boards,workspaces}) {
   const col=cols.find(x=>x.id===c.column);
   const groups=board?.groups||[];
 
-  const ColSel=({label="Column",flt,fk="column"})=>{
-    const list=flt?cols.filter(flt):cols;
-    return(
-      <div className="field-row">
-        <label className="field-label">{label}</label>
-        <select className="field-input" value={c[fk]||""} onChange={e=>set(fk,e.target.value)}>
-          <option value="">Select a column…</option>
-          {list.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}
-        </select>
-      </div>
-    );
-  };
-
-  const VSel=({fk="toValue",label="Value"})=>{
-    if(col?.type==="color"||col?.type==="status") return(
-      <div className="field-row">
-        <label className="field-label">{label}</label>
-        <select className="field-input" value={c[fk]||""} onChange={e=>set(fk,e.target.value)}>
-          <option value="">Any value</option>
-          {(col.values||[]).map(v=><option key={v} value={v}>{v}</option>)}
-        </select>
-      </div>
-    );
-    return(
-      <div className="field-row">
-        <label className="field-label">{label}</label>
-        <input className="field-input" value={c[fk]||""} onChange={e=>set(fk,e.target.value)} placeholder="Enter value…"/>
-      </div>
-    );
-  };
-
-  const GSel=({label="Group",fk="group"})=>(
-    <div className="field-row">
-      <label className="field-label">{label}</label>
-      <select className="field-input" value={c[fk]||""} onChange={e=>set(fk,e.target.value)}>
-        <option value="">Select a group…</option>
-        {groups.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}
-      </select>
-    </div>
-  );
-
-  const OSel=()=>(
-    <div className="field-row">
-      <label className="field-label">Operator</label>
-      <select className="field-input" value={c.operator||"equals"} onChange={e=>set("operator",e.target.value)}>
-        <option value="equals">equals</option>
-        <option value="not_equals">does not equal</option>
-        <option value="contains">contains</option>
-        <option value="empty">is empty</option>
-        <option value="not_empty">is not empty</option>
-      </select>
-    </div>
-  );
-
-  const Tokens=({tokens,field})=>(
-    <div style={{marginBottom:12}}>
-      <label className="field-label">Insert token</label>
-      <div>{tokens.map(tok=><span key={tok} className="token-pill" onClick={()=>set(field,(c[field]||"")+" "+tok)}>{tok}</span>)}</div>
-    </div>
-  );
-
-  const BP=({label="Board"})=>(
-    boards.length===0
-      ? <div className="field-row"><div style={{padding:"10px 12px",background:"var(--gray-50)",borderRadius:6,fontSize:13,color:"var(--gray-300)"}}>Connect monday.com in Settings to load boards</div></div>
-      : <BoardPicker value={c.board||""} onChange={v=>set("board",v)} boards={boards} workspaces={workspaces} label={label}/>
-  );
-
   if(boards.length===0) return(
     <div style={{textAlign:"center",padding:"24px 16px"}}>
       <div style={{fontSize:32,marginBottom:8}}>🔌</div>
@@ -565,12 +615,12 @@ function ConfigForm({node,onChange,boards,workspaces}) {
   );
 
   switch(node.subtype){
-    case"status_change":return<><BP label="Watch board"/><ColSel label="Status column" flt={x=>x.type==="color"||x.type==="status"}/>{col&&<VSel fk="toValue" label="Changes to"/>}<p className="hint">Fires whenever this status changes to the selected value on any item.</p></>;
-    case"item_created":return<><BP label="Watch board"/><p className="hint">Fires when any new item is created on this board.</p></>;
-    case"date_reached":return<><BP label="Watch board"/><ColSel label="Date column" flt={x=>x.type==="date"}/><div className="field-row"><label className="field-label">Offset (days before/after)</label><input className="field-input" type="number" value={c.offset||"0"} onChange={e=>set("offset",e.target.value)}/><p className="hint">0 = on the date. Negative = before, positive = after.</p></div></>;
-    case"column_changed":return<><BP label="Watch board"/><ColSel label="Column"/><p className="hint">Fires whenever this column changes to any value.</p></>;
-    case"if_else":return<><BP label="Check board"/><ColSel label="Column"/><OSel/>{c.operator!=="empty"&&c.operator!=="not_empty"&&<VSel fk="value" label="Value"/>}<div style={{padding:"10px 12px",background:"var(--monday-purple-light)",borderRadius:6,fontSize:13,marginBottom:12}}><strong style={{color:"var(--monday-purple)"}}>Yes</strong> path fires if true — <strong style={{color:"var(--monday-red)"}}>No</strong> path fires if false.</div></>;
-    case"filter":return<><BP label="Check board"/><ColSel label="Column"/><OSel/>{c.operator!=="empty"&&<VSel fk="value" label="Value"/>}<p className="hint">Execution stops here if the condition is false.</p></>;
+    case"status_change":return<><CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Watch board"/><CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Status column" flt={x=>x.type==="color"||x.type==="status"}/>{col&&<CfgVSel col={col} value={c.toValue||""} onChange={v=>set("toValue",v)} label="Changes to"/>}<p className="hint">Fires whenever this status changes to the selected value on any item.</p></>;
+    case"item_created":return<><CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Watch board"/><p className="hint">Fires when any new item is created on this board.</p></>;
+    case"date_reached":return<><CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Watch board"/><CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Date column" flt={x=>x.type==="date"}/><div className="field-row"><label className="field-label">Offset (days before/after)</label><input className="field-input" type="number" value={c.offset||"0"} onChange={e=>set("offset",e.target.value)}/><p className="hint">0 = on the date. Negative = before, positive = after.</p></div></>;
+    case"column_changed":return<><CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Watch board"/><CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Column"/><p className="hint">Fires whenever this column changes to any value.</p></>;
+    case"if_else":return<><CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Check board"/><CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Column"/><CfgOSel value={c.operator||"equals"} onChange={v=>set("operator",v)}/>{c.operator!=="empty"&&c.operator!=="not_empty"&&<CfgVSel col={col} value={c.value||""} onChange={v=>set("value",v)} label="Value"/>}<div style={{padding:"10px 12px",background:"var(--monday-purple-light)",borderRadius:6,fontSize:13,marginBottom:12}}><strong style={{color:"var(--monday-purple)"}}>Yes</strong> path fires if true — <strong style={{color:"var(--monday-red)"}}>No</strong> path fires if false.</div></>;
+    case"filter":return<><CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Check board"/><CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Column"/><CfgOSel value={c.operator||"equals"} onChange={v=>set("operator",v)}/>{c.operator!=="empty"&&<CfgVSel col={col} value={c.value||""} onChange={v=>set("value",v)} label="Value"/>}<p className="hint">Execution stops here if the condition is false.</p></>;
     case"notify":return<>
       <div className="field-row"><label className="field-label">Notify who</label>
         <select className="field-input" value={c.who||"assignee"} onChange={e=>set("who",e.target.value)}>
@@ -578,17 +628,17 @@ function ConfigForm({node,onChange,boards,workspaces}) {
         </select>
       </div>
       <div className="field-row"><label className="field-label">Message</label><textarea className="field-input" style={{height:80,resize:"vertical"}} value={c.message||""} onChange={e=>set("message",e.target.value)} placeholder="e.g. {{item.name}} has been completed!"/></div>
-      <Tokens tokens={["{{item.name}}","{{item.status}}","{{today}}"]} field="message"/>
+      <CfgTokens tokens={["{{item.name}}","{{item.status}}","{{today}}"]} current={c.message} onInsert={v=>set("message",v)}/>
     </>;
-    case"change_col":return<><BP label="Target board"/><ColSel label="Column to update"/>{col?.type==="color"||col?.type==="status"?<VSel fk="toValue" label="Set value to"/>:<div className="field-row"><label className="field-label">Set to</label><input className="field-input" value={c.toValue||""} onChange={e=>set("toValue",e.target.value)} placeholder="Value or {{token}}…"/></div>}</>;
-    case"create_item":return<><BP label="Create item on board"/>{c.board&&<GSel label="In group"/>}<div className="field-row"><label className="field-label">Item name</label><input className="field-input" value={c.itemName||""} onChange={e=>set("itemName",e.target.value)} placeholder="{{item.name}} — copy"/></div><Tokens tokens={["{{item.name}}","{{item.status}}","{{today}}"]} field="itemName"/></>;
+    case"change_col":return<><CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Target board"/><CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Column to update"/>{col?.type==="color"||col?.type==="status"?<CfgVSel col={col} value={c.toValue||""} onChange={v=>set("toValue",v)} label="Set value to"/>:<div className="field-row"><label className="field-label">Set to</label><input className="field-input" value={c.toValue||""} onChange={e=>set("toValue",e.target.value)} placeholder="Value or {{token}}…"/></div>}</>;
+    case"create_item":return<><CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Create item on board"/>{c.board&&<CfgGSel groups={groups} value={c.group||""} onChange={v=>set("group",v)} label="In group"/>}<div className="field-row"><label className="field-label">Item name</label><input className="field-input" value={c.itemName||""} onChange={e=>set("itemName",e.target.value)} placeholder="{{item.name}} — copy"/></div><CfgTokens tokens={["{{item.name}}","{{item.status}}","{{today}}"]} current={c.itemName} onInsert={v=>set("itemName",v)}/></>;
     case"create_group":return<>
-      <BP label="Create group on board"/>
+      <CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Create group on board"/>
       <div className="field-row"><label className="field-label">Group name</label><input className="field-input" value={c.groupName||""} onChange={e=>set("groupName",e.target.value)} placeholder="Completed — {{item.name}}"/></div>
-      <Tokens tokens={["{{item.name}}","{{item.status}}","{{today}}"]} field="groupName"/>
+      <CfgTokens tokens={["{{item.name}}","{{item.status}}","{{today}}"]} current={c.groupName} onInsert={v=>set("groupName",v)}/>
       {c.groupName&&<div className="field-row"><label className="field-label">Preview</label><div style={{padding:"8px 12px",background:"var(--gray-50)",borderRadius:6,fontSize:13,color:"var(--monday-purple)",fontWeight:500}}>{resolveTokens(c.groupName,{itemName:"Project Alpha"})}</div></div>}
     </>;
-    case"move_item":return<><BP label="Target board"/>{c.board&&<GSel label="Move item to group"/>}<p className="hint">Moves the item that triggered this automation.</p></>;
+    case"move_item":return<><CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Target board"/>{c.board&&<CfgGSel groups={groups} value={c.group||""} onChange={v=>set("group",v)} label="Move item to group"/>}<p className="hint">Moves the item that triggered this automation.</p></>;
     case"http_request":return<>
       <div className="field-row" style={{display:"flex",gap:8,alignItems:"flex-end"}}>
         <div style={{width:90}}>
@@ -603,11 +653,11 @@ function ConfigForm({node,onChange,boards,workspaces}) {
         </div>
       </div>
       <div className="field-row"><label className="field-label">Body (JSON)</label><textarea className="field-input" style={{height:90,resize:"vertical",fontFamily:"monospace",fontSize:12}} value={c.body||""} onChange={e=>set("body",e.target.value)}/></div>
-      <Tokens tokens={["{{item.name}}","{{item.status}}","{{item.id}}"]} field="body"/>
+      <CfgTokens tokens={["{{item.name}}","{{item.status}}","{{item.id}}"]} current={c.body} onInsert={v=>set("body",v)}/>
     </>;
     case"ai_step":return<>
       <div className="field-row"><label className="field-label">Claude prompt</label><textarea className="field-input" style={{height:90,resize:"vertical"}} value={c.prompt||""} onChange={e=>set("prompt",e.target.value)} placeholder="Summarize {{item.name}} and suggest next steps."/><p className="hint">{"{{ai.output}}"} is available in downstream nodes. Requires an Anthropic API key in Settings.</p></div>
-      <Tokens tokens={["{{item.name}}","{{item.status}}","{{item.owner}}"]} field="prompt"/>
+      <CfgTokens tokens={["{{item.name}}","{{item.status}}","{{item.owner}}"]} current={c.prompt} onInsert={v=>set("prompt",v)}/>
     </>;
     case"wait_time":return<>
       <div className="field-row" style={{display:"flex",gap:8,alignItems:"flex-end"}}>
@@ -616,10 +666,10 @@ function ConfigForm({node,onChange,boards,workspaces}) {
       </div>
       <p className="hint">Pauses automation for <strong>{c.amount||1} {c.unit||"business days"}</strong> before continuing. Requires Cloudflare Worker for long waits.</p>
     </>;
-    case"wait_event":return<><BP label="Watch board"/><ColSel label="Column"/><OSel/>{c.operator==="equals"&&<VSel fk="value" label="Value"/>}<p className="hint">Pauses until the condition becomes true (checked every 5 minutes).</p></>;
+    case"wait_event":return<><CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Watch board"/><CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Column"/><CfgOSel value={c.operator||"equals"} onChange={v=>set("operator",v)}/>{c.operator==="equals"&&<CfgVSel col={col} value={c.value||""} onChange={v=>set("value",v)} label="Value"/>}<p className="hint">Pauses until the condition becomes true (checked every 5 minutes).</p></>;
 
     case"formula_math":return<>
-      <BP label="Source board (where to read columns)"/>
+      <CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Source board"/>
       {c.board&&<>
         <div className="field-row">
           <label className="field-label">Formula</label>
@@ -638,7 +688,7 @@ function ConfigForm({node,onChange,boards,workspaces}) {
           </div>
           <p className="hint">Both columns must be number type. Result = Column A {c.operator||"+"} Column B.</p>
         </div>
-        <ColSel label="Write result to column" flt={x=>x.type==="numbers"||x.type==="numeric"} fk="resultCol"/>
+        <CfgColSel cols={cols} value={c.resultCol||""} onChange={v=>set("resultCol",v)} label="Write result to column" flt={x=>x.type==="numbers"||x.type==="numeric"}/>
         {c.colA&&c.colB&&c.resultCol&&<div style={{padding:"10px 12px",background:"var(--monday-teal-light)",borderRadius:6,fontSize:13,color:"var(--monday-teal)",fontWeight:500}}>
           ∑ {cols.find(x=>x.id===c.colA)?.name||"A"} {c.operator||"+"} {cols.find(x=>x.id===c.colB)?.name||"B"} → {cols.find(x=>x.id===c.resultCol)?.name||"Result"}
         </div>}
@@ -646,7 +696,7 @@ function ConfigForm({node,onChange,boards,workspaces}) {
     </>;
 
     case"formula_pct":return<>
-      <BP label="Source board"/>
+      <CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Source board"/>
       {c.board&&<>
         <div className="field-row">
           <label className="field-label">Numerator (part)</label>
@@ -662,13 +712,13 @@ function ConfigForm({node,onChange,boards,workspaces}) {
             {cols.filter(x=>x.type==="numbers"||x.type==="numeric").map(x=><option key={x.id} value={x.id}>{x.name}</option>)}
           </select>
         </div>
-        <ColSel label="Write result % to column" flt={x=>x.type==="numbers"||x.type==="numeric"} fk="resultCol"/>
+        <CfgColSel cols={cols} value={c.resultCol||""} onChange={v=>set("resultCol",v)} label="Write result % to column" flt={x=>x.type==="numbers"||x.type==="numeric"}/>
         <p className="hint">Result = (Column A ÷ Column B) × 100. For example: 25 ÷ 100 = 25%.</p>
       </>}
     </>;
 
     case"formula_if":return<>
-      <BP label="Source board"/>
+      <CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Source board"/>
       {c.board&&<>
         <div className="field-row">
           <label className="field-label">Condition</label>
@@ -691,12 +741,12 @@ function ConfigForm({node,onChange,boards,workspaces}) {
           <label className="field-label">If false, write</label>
           <input className="field-input" value={c.falseVal||""} onChange={e=>set("falseVal",e.target.value)} placeholder="e.g. Behind"/>
         </div>
-        <ColSel label="Write result to column" fk="resultCol"/>
+        <CfgColSel cols={cols} value={c.resultCol||""} onChange={v=>set("resultCol",v)} label="Write result to column"/>
       </>}
     </>;
 
     case"formula_concat":return<>
-      <BP label="Source board"/>
+      <CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Source board"/>
       {c.board&&<>
         <div className="field-row">
           <label className="field-label">Columns to combine (in order)</label>
@@ -717,7 +767,7 @@ function ConfigForm({node,onChange,boards,workspaces}) {
           <label className="field-label">Separator between values</label>
           <input className="field-input" value={c.separator!=null?c.separator:" "} onChange={e=>set("separator",e.target.value)} placeholder="space, comma, dash…"/>
         </div>
-        <ColSel label="Write combined text to column" fk="resultCol"/>
+        <CfgColSel cols={cols} value={c.resultCol||""} onChange={v=>set("resultCol",v)} label="Write combined text to column"/>
       </>}
     </>;
 
