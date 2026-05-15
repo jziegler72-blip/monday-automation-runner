@@ -157,8 +157,13 @@ function triggerMatches(trigger, ctx) {
     case "item_created":
       return String(c.board) === ctx.boardId && !ctx.columnId;
     case "column_changed":
-      return String(c.board) === ctx.boardId
-        && (!c.column || c.column === ctx.columnId);
+      if (String(c.board) !== ctx.boardId) return false;
+      // If a specific column is configured, it MUST match — never run for other columns
+      if (c.column && c.column !== ctx.columnId) {
+        console.log(`column_changed: skipping — trigger column ${c.column} ≠ event column ${ctx.columnId}`);
+        return false;
+      }
+      return true;
     case "date_reached":
       return String(c.board) === ctx.boardId;
     default:
@@ -177,24 +182,29 @@ function evalCondition(node, ctx) {
     : ctx.itemStatus;
 
   const val  = String(rawVal || "");
-  const num  = parseFloat(val);
-  const cNum = parseFloat(c.value);
 
-  console.log(`Condition eval: column=${c.column} value="${val}" operator=${c.operator} compare="${c.value}"`);
+  // Strip non-numeric characters (%, $, commas, spaces) for numeric comparisons
+  const numStr = val.replace(/[^0-9.\-]/g, "");
+  const cNumStr = String(c.value || "").replace(/[^0-9.\-]/g, "");
+  const num  = parseFloat(numStr);
+  const cNum = parseFloat(cNumStr);
+  const cNum2 = parseFloat(String(c.valueTo || "").replace(/[^0-9.\-]/g, ""));
+
+  console.log(`Condition eval: column=${c.column} rawVal="${rawVal}" numericVal=${num} operator=${c.operator} compare=${cNum} compareTo=${cNum2}`);
 
   switch (c.operator) {
-    case "equals":                return val === c.value                              ? "yes" : "no";
-    case "not_equals":            return val !== c.value                              ? "yes" : "no";
-    case "contains":              return val.includes(c.value)                        ? "yes" : "no";
-    case "not_contains":          return !val.includes(c.value)                       ? "yes" : "no";
-    case "starts_with":           return val.startsWith(c.value)                      ? "yes" : "no";
-    case "greater_than":          return num > cNum                                   ? "yes" : "no";
-    case "greater_than_or_equal": return num >= cNum                                  ? "yes" : "no";
-    case "less_than":             return num < cNum                                   ? "yes" : "no";
-    case "less_than_or_equal":    return num <= cNum                                  ? "yes" : "no";
-    case "between":               return num >= cNum && num <= parseFloat(c.valueTo)  ? "yes" : "no";
-    case "empty":                 return !val                                         ? "yes" : "no";
-    case "not_empty":             return !!val                                        ? "yes" : "no";
+    case "equals":                return val === c.value                    ? "yes" : "no";
+    case "not_equals":            return val !== c.value                    ? "yes" : "no";
+    case "contains":              return val.includes(c.value)              ? "yes" : "no";
+    case "not_contains":          return !val.includes(c.value)             ? "yes" : "no";
+    case "starts_with":           return val.startsWith(c.value)           ? "yes" : "no";
+    case "greater_than":          return num > cNum                         ? "yes" : "no";
+    case "greater_than_or_equal": return num >= cNum                        ? "yes" : "no";
+    case "less_than":             return num < cNum                         ? "yes" : "no";
+    case "less_than_or_equal":    return num <= cNum                        ? "yes" : "no";
+    case "between":               return num >= cNum && num <= cNum2        ? "yes" : "no";
+    case "empty":                 return !val                               ? "yes" : "no";
+    case "not_empty":             return !!val                              ? "yes" : "no";
     default:                      return "yes";
   }
 }
