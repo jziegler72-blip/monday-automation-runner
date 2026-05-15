@@ -91,18 +91,20 @@ function dbUpsert(auto) {
     edge_count:    auto.edgeCount    || 0,
     nodes:         auto.nodes,
     edges:         auto.edges,
+    monday_token:  auto.mondayToken  || null,
     deployed_at:   auto.deployedAt   || new Date().toISOString(),
     updated_at:    new Date().toISOString(),
   });
 }
 
 // ─── monday.com GraphQL ───────────────────────────────────────────────────────
-async function mondayGQL(query, variables = {}) {
+async function mondayGQL(query, variables = {}, token) {
+  const useToken = token || process.env.MONDAY_TOKEN;
   const res = await fetch(MONDAY_API, {
     method: "POST",
     headers: {
       "Content-Type":  "application/json",
-      "Authorization": process.env.MONDAY_TOKEN,
+      "Authorization": useToken,
       "API-Version":   "2024-01",
     },
     body: JSON.stringify({ query, variables }),
@@ -114,7 +116,8 @@ async function mondayGQL(query, variables = {}) {
 
 // ─── Webhook registration ─────────────────────────────────────────────────────
 async function registerWebhooks(auto, siteUrl) {
-  if (!process.env.MONDAY_TOKEN || !siteUrl) return;
+  const token = auto.monday_token || auto.mondayToken || process.env.MONDAY_TOKEN;
+  if (!token || !siteUrl) return;
   const webhookUrl = `${siteUrl}/api/webhook`;
   const eventMap   = {
     status_change:  "change_status_column_value",
@@ -129,7 +132,8 @@ async function registerWebhooks(auto, siteUrl) {
     try {
       await mondayGQL(
         `mutation($b:ID!,$u:String!,$e:WebhookEventType!){create_webhook(board_id:$b,url:$u,event:$e){id}}`,
-        { b: c.board, u: webhookUrl, e: event }
+        { b: c.board, u: webhookUrl, e: event },
+        token
       );
     } catch(e) {
       console.log("Webhook register note:", e.message);
@@ -189,8 +193,9 @@ function resolveTokens(str, ctx) {
 }
 
 // ─── Action executors ─────────────────────────────────────────────────────────
-async function execAction(node, ctx) {
+async function execAction(node, ctx, token) {
   const c = node.config || {};
+  const useToken = token || process.env.MONDAY_TOKEN;
   try {
     switch (node.subtype) {
 
@@ -198,7 +203,8 @@ async function execAction(node, ctx) {
         const name = resolveTokens(c.groupName || "New Group", ctx);
         const data = await mondayGQL(
           `mutation($b:ID!,$n:String!){create_group(board_id:$b,group_name:$n){id title}}`,
-          { b: c.board, n: name }
+          { b: c.board, n: name },
+          useToken
         );
         return { ok: true, result: `Created group "${data.create_group.title}"` };
       }
@@ -209,7 +215,8 @@ async function execAction(node, ctx) {
         if (c.group) vars.g = c.group;
         const data = await mondayGQL(
           `mutation($b:Int!,$n:String!,$g:String,$cv:JSON!){create_item(board_id:$b,item_name:$n,group_id:$g,column_values:$cv){id name}}`,
-          vars
+          vars,
+          useToken
         );
         return { ok: true, result: `Created item "${data.create_item.name}"`, newItemId: data.create_item.id };
       }
@@ -218,7 +225,8 @@ async function execAction(node, ctx) {
         if (!ctx.itemId) return { ok: false, result: "No itemId in context" };
         await mondayGQL(
           `mutation($b:Int!,$i:Int!,$c:String!,$v:JSON!){change_column_value(board_id:$b,item_id:$i,column_id:$c,value:$v){id}}`,
-          { b: parseInt(c.board), i: parseInt(ctx.itemId), c: c.column, v: JSON.stringify({ label: c.toValue }) }
+          { b: parseInt(c.board), i: parseInt(ctx.itemId), c: c.column, v: JSON.stringify({ label: c.toValue }) },
+          useToken
         );
         return { ok: true, result: `Set "${c.column}" to "${c.toValue}"` };
       }
@@ -227,7 +235,8 @@ async function execAction(node, ctx) {
         if (!ctx.itemId) return { ok: false, result: "No itemId in context" };
         await mondayGQL(
           `mutation($i:Int!,$g:String!){move_item_to_group(item_id:$i,group_id:$g){id}}`,
-          { i: parseInt(ctx.itemId), g: c.group }
+          { i: parseInt(ctx.itemId), g: c.group },
+          useToken
         );
         return { ok: true, result: `Moved item to group "${c.group}"` };
       }
@@ -261,12 +270,13 @@ async function execAction(node, ctx) {
         const msg = resolveTokens(c.message || "Automation triggered", ctx);
         if (ctx.itemId) {
           try {
-            const me     = await mondayGQL(`{me{id}}`);
+            const me     = await mondayGQL(`{me{id}}`, {}, useToken);
             const userId = me?.me?.id;
             if (userId) {
               await mondayGQL(
                 `mutation($u:Int!,$i:Int!,$m:String!){create_notification(user_id:$u,target_id:$i,text:$m,target_type:Project){text}}`,
-                { u: parseInt(userId), i: parseInt(ctx.itemId), m: msg }
+                { u: parseInt(userId), i: parseInt(ctx.itemId), m: msg },
+                useToken
               );
               return { ok: true, result: `Notified user ${userId}` };
             }
@@ -285,6 +295,7 @@ async function execAction(node, ctx) {
 
 // ─── Automation runner ────────────────────────────────────────────────────────
 async function runAutomation(auto, eventCtx) {
+  const token = auto.monday_token || auto.mondayToken || process.env.MONDAY_TOKEN;
   const nodes = auto.nodes || [];
   const edges = auto.edges || [];
   const adj   = {};
@@ -315,7 +326,7 @@ async function runAutomation(auto, eventCtx) {
       });
 
     } else if (node.type === "action") {
-      const result = await execAction(node, ctx);
+      const result = await execAction(node, ctx, token);
       const next   = {
         ...ctx,
         ...(result.aiOutput  ? { aiOutput: result.aiOutput }  : {}),
