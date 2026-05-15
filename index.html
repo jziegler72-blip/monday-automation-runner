@@ -56,15 +56,33 @@ async function mondayGQL(token, query, variables = {}) {
 }
 
 async function fetchBoardData(token) {
-  const data = await mondayGQL(token, `{
-    boards(limit:20){
-      id name
-      groups{id title}
-      columns{id title type settings_str}
-    }
-  }`);
-  return (data.boards||[]).map(b=>({
+  // Fetch workspaces first
+  const wsData = await mondayGQL(token, `{ workspaces { id name kind } }`);
+  const workspaces = wsData.workspaces || [];
+
+  // Paginate through all boards (50 per page, up to 500 total)
+  let allBoards = [];
+  let page = 1;
+  while(true) {
+    const data = await mondayGQL(token, `{
+      boards(limit:50, page:${page}) {
+        id name workspace { id name }
+        groups { id title }
+        columns { id title type settings_str }
+      }
+    }`);
+    const batch = data.boards || [];
+    allBoards = allBoards.concat(batch);
+    if(batch.length < 50) break;
+    page++;
+    if(page > 10) break;
+  }
+
+  // Map boards with workspace info
+  const boards = allBoards.map(b=>({
     id:b.id, name:b.name,
+    workspaceId: b.workspace?.id || "main",
+    workspaceName: b.workspace?.name || "Main Workspace",
     groups:(b.groups||[]).map(g=>({id:g.id,name:g.title})),
     columns:(b.columns||[]).map(col=>{
       let values=[];
@@ -72,6 +90,16 @@ async function fetchBoardData(token) {
       return{id:col.id,name:col.title,type:col.type,values};
     }),
   }));
+
+  // Build workspace map for grouping
+  const wsMap = {};
+  boards.forEach(b=>{
+    const key = b.workspaceId;
+    if(!wsMap[key]) wsMap[key] = { id:key, name:b.workspaceName, boards:[] };
+    wsMap[key].boards.push(b);
+  });
+
+  return { boards, workspaces: Object.values(wsMap) };
 }
 
 // ─── Deploy API ───────────────────────────────────────────────────────────────
@@ -220,7 +248,7 @@ function nodeSummary(node,boards){
   }
 }
 
-function ConfigForm({node,onChange,boards}){
+function ConfigForm({node,onChange,boards,workspaces=[]}){
   const c=node.config||{};const set=(k,v)=>onChange({...c,[k]:v});
   const board=boards.find(b=>b.id===c.board);const cols=board?.columns||[];
   const col=cols.find(x=>x.id===c.column);const groups=board?.groups||[];
@@ -231,7 +259,67 @@ function ConfigForm({node,onChange,boards}){
     pill:{display:"inline-block",padding:"2px 8px",borderRadius:10,fontSize:9.5,background:"#6C63FF1A",color:"#9B8FFF",border:"0.5px solid #6C63FF33",marginRight:4,marginBottom:4,cursor:"pointer",userSelect:"none"},
     r2:{display:"flex",gap:8,marginBottom:11,alignItems:"flex-end"},
   };
-  const BSel=({label="Board"})=>(<div style={fi.row}><label style={fi.lbl}>{label}</label><select style={fi.inp} value={c.board||""} onChange={e=>set("board",e.target.value)}><option value="">— select board —</option>{boards.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}</select></div>);
+  // Workspace-grouped board selector
+  const BSel=({label="Board"})=>{
+    const [open,setOpen]=useState(false);
+    const [search,setSearch]=useState("");
+    const selected=boards.find(b=>b.id===c.board);
+    const filtered=boards.filter(b=>b.name.toLowerCase().includes(search.toLowerCase()));
+    // Group filtered boards by workspace
+    const grouped={};
+    filtered.forEach(b=>{
+      const key=b.workspaceId||"main";
+      const wn=b.workspaceName||"Main Workspace";
+      if(!grouped[key])grouped[key]={name:wn,boards:[]};
+      grouped[key].boards.push(b);
+    });
+    return(
+      <div style={{...fi.row,position:"relative"}}>
+        <label style={fi.lbl}>{label}</label>
+        <div style={{...fi.inp,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 8px"}}
+          onClick={()=>setOpen(o=>!o)}>
+          <span style={{color:selected?"#C8C5E8":"#444",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+            {selected?`${selected.workspaceName} / ${selected.name}`:"— select board —"}
+          </span>
+          <span style={{color:"#555",flexShrink:0,marginLeft:4}}>{open?"▲":"▼"}</span>
+        </div>
+        {open&&(
+          <div style={{position:"absolute",top:"100%",left:0,right:0,zIndex:999,
+            background:"#1A1A28",border:"0.5px solid #2A2A3A",borderRadius:5,
+            maxHeight:260,overflow:"hidden",display:"flex",flexDirection:"column",boxShadow:"0 4px 20px #00000088"}}>
+            <input autoFocus style={{...fi.inp,borderRadius:0,borderBottom:"0.5px solid #2A2A3A",
+              background:"#111118",fontSize:11}} placeholder="Search boards…"
+              value={search} onChange={e=>setSearch(e.target.value)}
+              onClick={e=>e.stopPropagation()}/>
+            <div style={{overflowY:"auto",flex:1}}>
+              {Object.entries(grouped).map(([wsId,ws])=>(
+                <div key={wsId}>
+                  <div style={{padding:"6px 10px 3px",fontSize:9,color:"#6C63FF",
+                    letterSpacing:1,textTransform:"uppercase",fontWeight:700,
+                    background:"#111118",borderBottom:"0.5px solid #1A1A25",
+                    display:"flex",alignItems:"center",gap:6}}>
+                    <span>⬡</span>{ws.name}
+                  </div>
+                  {ws.boards.map(b=>(
+                    <div key={b.id}
+                      style={{padding:"7px 10px 7px 20px",fontSize:12,
+                        color:b.id===c.board?"#9B8FFF":"#C8C5E8",
+                        background:b.id===c.board?"#6C63FF22":"transparent",
+                        cursor:"pointer",borderBottom:"0.5px solid #1A1A22"}}
+                      onClick={()=>{set("board",b.id);setOpen(false);setSearch("");}}>
+                      {b.id===c.board&&<span style={{marginRight:6}}>✓</span>}
+                      {b.name}
+                    </div>
+                  ))}
+                </div>
+              ))}
+              {filtered.length===0&&<div style={{padding:"12px",color:"#444",fontSize:11,textAlign:"center"}}>No boards match</div>}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
   const CSel=({label="Column",flt})=>{const list=flt?cols.filter(flt):cols;return(<div style={fi.row}><label style={fi.lbl}>{label}</label><select style={fi.inp} value={c.column||""} onChange={e=>set("column",e.target.value)}><option value="">— select column —</option>{list.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></div>);};
   const VSel=({fk="toValue",label="Value"})=>col?.type==="color"||col?.type==="status"?(<div style={fi.row}><label style={fi.lbl}>{label}</label><select style={fi.inp} value={c[fk]||""} onChange={e=>set(fk,e.target.value)}><option value="">— any —</option>{(col.values||[]).map(v=><option key={v} value={v}>{v}</option>)}</select></div>):(<div style={fi.row}><label style={fi.lbl}>{label}</label><input style={fi.inp} value={c[fk]||""} onChange={e=>set(fk,e.target.value)} placeholder="Value…"/></div>);
   const GSel=({label="Group",fk="group"})=>(<div style={fi.row}><label style={fi.lbl}>{label}</label><select style={fi.inp} value={c[fk]||""} onChange={e=>set(fk,e.target.value)}><option value="">— select group —</option>{groups.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}</select></div>);
@@ -276,39 +364,98 @@ function ConfigForm({node,onChange,boards}){
   }
 }
 
-function DeployPanel({nodes,edges,automationName,isActive,onDeploySuccess}){
+function DeployPanel({nodes,edges,automationName,isActive,onDeploySuccess,boards,mondayToken}){
   const [status,setStatus]=useState(null);
   const [msg,setMsg]=useState("");
   const [deployed,setDeployed]=useState([]);
   const [loadingList,setLoadingList]=useState(false);
   const fetchDeployed=async()=>{setLoadingList(true);try{const d=await listDeployed();setDeployed(d.automations||[]);}catch{setDeployed([]);}setLoadingList(false);};
   useEffect(()=>{fetchDeployed();},[]);
+
+  // Validate nodes have required config before deploy
+  const issues=[];
+  nodes.forEach(node=>{
+    const c=node.config||{};
+    if(node.type==="trigger"&&!c.board) issues.push(`Trigger "${node.label}" has no board selected`);
+    if(node.type==="trigger"&&node.subtype==="status_change"&&!c.toValue) issues.push(`Trigger "${node.label}" has no status value set`);
+    if(node.type==="action"&&node.subtype==="create_group"&&!c.board) issues.push(`Action "${node.label}" has no target board`);
+    if(node.type==="action"&&node.subtype==="create_group"&&!c.groupName) issues.push(`Action "${node.label}" has no group name`);
+    if(node.type==="action"&&node.subtype==="create_item"&&!c.board) issues.push(`Action "${node.label}" has no target board`);
+  });
+
   const deploy=async(activate)=>{
     setStatus("deploying");setMsg("");
     try{
-      const auto={...serializeAuto(automationName,nodes,edges,activate??isActive),deployedAt:new Date().toISOString(),deployStatus:activate?"active":"deployed"};
+      const auto={
+        ...serializeAuto(automationName,nodes,edges,activate??isActive),
+        deployedAt:new Date().toISOString(),
+        deployStatus:activate?"active":"deployed",
+        mondayToken: mondayToken, // stored per-user in Supabase
+      };
       await deployToNetlify(auto);
-      setStatus("ok");setMsg(`Deployed "${automationName}"`);
+      setStatus("ok");setMsg(`Deployed "${automationName}" — ${nodes.length} nodes, ${edges.length} connections`);
       onDeploySuccess(auto);await fetchDeployed();
     }catch(e){setStatus("error");setMsg(e.message);}
   };
   const undeploy=async(id)=>{try{await deleteFromNetlify(id);await fetchDeployed();}catch(e){setMsg(e.message);}};
   const sc=status==="ok"?"#52D98C":status==="error"?"#E74C3C":"#5DADE2";
   const fmt=iso=>new Date(iso).toLocaleDateString(undefined,{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"});
+
+  // Build human-readable summary of what the automation does
+  const summary=nodes.map(node=>{
+    const c=node.config||{};
+    const bn=boards.find(b=>b.id===c.board)?.name||c.board||"?";
+    if(node.type==="trigger"&&node.subtype==="status_change") return `⚡ When status changes to "${c.toValue||"?"}" on ${bn}`;
+    if(node.type==="trigger"&&node.subtype==="item_created") return `⚡ When item created on ${bn}`;
+    if(node.type==="condition"&&node.subtype==="if_else") return `⬡ If ${c.column||"?"} ${c.operator||"="} "${c.value||"?"}"`;
+    if(node.type==="action"&&node.subtype==="create_group") return `→ Create group "${c.groupName||"?"}" on ${bn}`;
+    if(node.type==="action"&&node.subtype==="create_item") return `→ Create item "${c.itemName||"?"}" on ${bn}`;
+    if(node.type==="action"&&node.subtype==="notify") return `→ Notify ${c.who||"assignee"}`;
+    if(node.type==="action"&&node.subtype==="change_col") return `→ Set ${c.column||"?"} to "${c.toValue||"?"}"`;
+    if(node.type==="action"&&node.subtype==="http_request") return `→ ${c.method||"POST"} ${(c.url||"?").replace(/https?:\/\//,"").slice(0,30)}`;
+    if(node.type==="wait") return `◷ Wait ${c.amount||1} ${c.unit||"days"}`;
+    return `${node.type}: ${node.label}`;
+  });
+
   return(
     <div style={{display:"flex",flexDirection:"column",height:"100%",overflow:"hidden"}}>
       <div style={{padding:"10px 12px 8px",borderBottom:"0.5px solid #1A1A28"}}><span style={{fontSize:10,color:"#52D98C",letterSpacing:1,textTransform:"uppercase",fontWeight:700}}>⬡ Deploy</span></div>
       <div style={{overflowY:"auto",flex:1,padding:"12px"}}>
-        <div style={{display:"flex",gap:6,marginBottom:12}}>
-          <button style={{flex:1,background:"#27AE6022",color:"#52D98C",border:"0.5px solid #27AE6055",padding:"7px",borderRadius:5,cursor:"pointer",fontSize:11,fontFamily:"inherit",fontWeight:600,opacity:status==="deploying"?0.5:1}} onClick={()=>deploy(false)} disabled={status==="deploying"}>{status==="deploying"?"Deploying…":"↑ Deploy"}</button>
-          <button style={{flex:1,background:"#6C63FF22",color:"#9B8FFF",border:"0.5px solid #6C63FF55",padding:"7px",borderRadius:5,cursor:"pointer",fontSize:11,fontFamily:"inherit",fontWeight:600,opacity:status==="deploying"?0.5:1}} onClick={()=>deploy(true)} disabled={status==="deploying"}>↑ Deploy + Activate</button>
+
+        {/* Automation summary */}
+        <div style={{marginBottom:12,background:"#181825",borderRadius:6,padding:"10px"}}>
+          <div style={{fontSize:9,color:"#555",letterSpacing:1,textTransform:"uppercase",marginBottom:8}}>Automation summary</div>
+          {summary.map((s,i)=>(
+            <div key={i} style={{fontSize:11,color:"#888",padding:"3px 0",borderBottom:"0.5px solid #1A1A22",lineHeight:1.4}}>{s}</div>
+          ))}
         </div>
+
+        {/* Validation warnings */}
+        {issues.length>0&&(
+          <div style={{marginBottom:12,padding:"8px 10px",background:"#F39C1211",border:"0.5px solid #F39C1244",borderRadius:5}}>
+            <div style={{fontSize:9,color:"#F5B942",letterSpacing:1,textTransform:"uppercase",marginBottom:6}}>⚠ Issues to fix</div>
+            {issues.map((issue,i)=><div key={i} style={{fontSize:10,color:"#F5B942",marginBottom:3}}>{issue}</div>)}
+          </div>
+        )}
+
+        <div style={{display:"flex",gap:6,marginBottom:12}}>
+          <button style={{flex:1,background:"#27AE6022",color:"#52D98C",border:"0.5px solid #27AE6055",padding:"7px",borderRadius:5,cursor:status==="deploying"?"not-allowed":"pointer",fontSize:11,fontFamily:"inherit",fontWeight:600,opacity:status==="deploying"?0.5:1}} onClick={()=>deploy(false)} disabled={status==="deploying"}>{status==="deploying"?"Deploying…":"↑ Deploy"}</button>
+          <button style={{flex:1,background:"#6C63FF22",color:"#9B8FFF",border:"0.5px solid #6C63FF55",padding:"7px",borderRadius:5,cursor:status==="deploying"?"not-allowed":"pointer",fontSize:11,fontFamily:"inherit",fontWeight:600,opacity:status==="deploying"?0.5:1}} onClick={()=>deploy(true)} disabled={status==="deploying"}>↑ Deploy + Activate</button>
+        </div>
+
         {status&&status!=="deploying"&&<div style={{padding:"7px 10px",background:sc+"11",border:`0.5px solid ${sc}33`,borderRadius:5,fontSize:11,color:sc,marginBottom:12,wordBreak:"break-word"}}>{status==="ok"?"✓ ":"✗ "}{msg}</div>}
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}><div style={{fontSize:9,color:"#444",letterSpacing:1,textTransform:"uppercase"}}>Deployed ({deployed.length})</div><button style={{background:"transparent",border:"none",color:"#555",fontSize:10,cursor:"pointer",fontFamily:"inherit"}} onClick={fetchDeployed}>{loadingList?"…":"↺"}</button></div>
+
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+          <div style={{fontSize:9,color:"#444",letterSpacing:1,textTransform:"uppercase"}}>Deployed ({deployed.length})</div>
+          <button style={{background:"transparent",border:"none",color:"#555",fontSize:10,cursor:"pointer",fontFamily:"inherit"}} onClick={fetchDeployed}>{loadingList?"…":"↺"}</button>
+        </div>
         {deployed.length===0&&!loadingList&&<div style={{color:"#2E2E3E",fontSize:11,textAlign:"center",padding:"10px 0"}}>None deployed yet</div>}
         {deployed.map(auto=>(<div key={auto.id} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 0",borderBottom:"0.5px solid #181825"}}>
           <span style={{width:6,height:6,borderRadius:3,background:auto.is_active?"#52D98C":"#555",flexShrink:0}}/>
-          <div style={{flex:1,minWidth:0}}><div style={{fontSize:11,color:"#C8C5E8",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{auto.name}</div><div style={{fontSize:9,color:"#444",fontFamily:"monospace"}}>{fmt(auto.updated_at)}</div></div>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:11,color:"#C8C5E8",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{auto.name}</div>
+            <div style={{fontSize:9,color:"#444",fontFamily:"monospace"}}>{fmt(auto.updated_at)}</div>
+          </div>
           <button style={{background:"transparent",border:"0.5px solid #E74C3C33",color:"#E74C3C88",padding:"2px 6px",borderRadius:3,cursor:"pointer",fontSize:9,fontFamily:"inherit"}} onClick={()=>undeploy(auto.id)}>remove</button>
         </div>))}
       </div>
@@ -366,7 +513,52 @@ const Sb={
   act:{background:"transparent",border:"0.5px solid #252535",color:"#666",padding:"3px 7px",borderRadius:4,cursor:"pointer",fontSize:10,fontFamily:"inherit"},
 };
 
-function SettingsPanel({mondayToken,setMondayToken,anthropicKey,setAnthropicKey,boards,onConnect,connecting,connectError}){
+function WorkspaceList({workspaces,boards}){
+  const [openWs,setOpenWs]=useState({});
+  const toggle=id=>setOpenWs(o=>({...o,[id]:!o[id]}));
+  // Default first workspace open
+  useEffect(()=>{
+    if(workspaces.length>0&&Object.keys(openWs).length===0){
+      setOpenWs({[workspaces[0].id]:true});
+    }
+  },[workspaces]);
+  return(
+    <div style={{marginTop:14}}>
+      <div style={{fontSize:9,color:"#444",letterSpacing:1,textTransform:"uppercase",marginBottom:8}}>
+        {boards.length} boards · {workspaces.length} workspaces
+      </div>
+      {workspaces.map(ws=>(
+        <div key={ws.id} style={{marginBottom:4,border:"0.5px solid #1E1E28",borderRadius:6,overflow:"hidden"}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+            padding:"7px 10px",background:"#161622",cursor:"pointer"}}
+            onClick={()=>toggle(ws.id)}>
+            <div style={{display:"flex",alignItems:"center",gap:7}}>
+              <span style={{color:"#6C63FF",fontSize:11}}>⬡</span>
+              <span style={{fontSize:11,color:"#C8C5E8",fontWeight:500}}>{ws.name}</span>
+              <span style={{fontSize:9,color:"#444",fontFamily:"monospace"}}>{ws.boards.length} boards</span>
+            </div>
+            <span style={{color:"#444",fontSize:10}}>{openWs[ws.id]?"▲":"▼"}</span>
+          </div>
+          {openWs[ws.id]&&(
+            <div>
+              {ws.boards.map(b=>(
+                <div key={b.id} style={{display:"flex",justifyContent:"space-between",
+                  padding:"5px 10px 5px 22px",borderTop:"0.5px solid #1A1A25",fontSize:11}}>
+                  <span style={{color:"#777"}}>{b.name}</span>
+                  <span style={{fontFamily:"monospace",fontSize:9,color:"#333"}}>
+                    {b.groups.length}g · {b.columns.length}c
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SettingsPanel({mondayToken,setMondayToken,anthropicKey,setAnthropicKey,boards,workspaces,onConnect,connecting,connectError}){
   const [mt,setMt]=useState(mondayToken);const [ak,setAk]=useState(anthropicKey);
   const inp={width:"100%",background:"#181825",border:"0.5px solid #2A2A3A",color:"#C8C5E8",padding:"7px 9px",borderRadius:5,fontSize:12,fontFamily:"monospace",boxSizing:"border-box"};
   return(
@@ -387,7 +579,7 @@ function SettingsPanel({mondayToken,setMondayToken,anthropicKey,setAnthropicKey,
         {connecting?"Connecting…":boards.length>0?"✓ Reconnect":"Connect to monday.com"}
       </button>
       {connectError&&<div style={{marginTop:10,padding:"8px 10px",background:"#E74C3C11",border:"0.5px solid #E74C3C44",borderRadius:5,fontSize:11,color:"#E74C3C"}}>{connectError}</div>}
-      {boards.length>0&&<div style={{marginTop:14}}><div style={{fontSize:9,color:"#444",letterSpacing:1,textTransform:"uppercase",marginBottom:8}}>{boards.length} boards loaded</div>{boards.map(b=><div key={b.id} style={{display:"flex",justifyContent:"space-between",padding:"4px 0",borderBottom:"0.5px solid #1A1A25",fontSize:11}}><span style={{color:"#888"}}>{b.name}</span><span style={{fontFamily:"monospace",fontSize:9,color:"#444"}}>{b.groups.length}g · {b.columns.length}c</span></div>)}</div>}
+      {boards.length>0&&<WorkspaceList workspaces={workspaces} boards={boards}/>}
       <div style={{marginTop:16,padding:"10px",background:"#1A1A25",borderRadius:6,fontSize:10,color:"#555",lineHeight:1.6}}>
         This builder is hosted at <strong style={{color:"#888"}}>monday-automation-runner.netlify.app</strong> — all API calls go through your Netlify function, never directly from the browser.
       </div>
@@ -416,6 +608,7 @@ function App(){
   const [mondayToken,setMondayToken]=useState(()=>localStorage.getItem("mondayToken")||"");
   const [anthropicKey,setAnthropicKey]=useState(()=>localStorage.getItem("anthropicKey")||"");
   const [boards,setBoards]=useState([]);
+  const [workspaces,setWorkspaces]=useState([]);
   const [apiConnecting,setApiConnecting]=useState(false);
   const [connectError,setConnectError]=useState("");
   const [webhookSecret,setWebhookSecret]=useState("");
@@ -437,7 +630,7 @@ function App(){
 
   const svgPt=useCallback((e)=>{const r=svgRef.current.getBoundingClientRect();return{x:(e.clientX-r.left-pan.x)/zoom,y:(e.clientY-r.top-pan.y)/zoom};},[pan,zoom]);
 
-  const connectMonday=async(token)=>{if(!token){setConnectError("Enter your monday.com API token.");return;}setApiConnecting(true);setConnectError("");try{const data=await fetchBoardData(token);setBoards(data);setConnectError("");}catch(e){setConnectError(e.message.slice(0,120));setBoards([]);}finally{setApiConnecting(false);};};
+  const connectMonday=async(token)=>{if(!token){setConnectError("Enter your monday.com API token.");return;}setApiConnecting(true);setConnectError("");try{const data=await fetchBoardData(token);setBoards(data.boards||[]);setWorkspaces(data.workspaces||[]);setConnectError("");}catch(e){setConnectError(e.message.slice(0,120));setBoards([]);setWorkspaces([]);}finally{setApiConnecting(false);};};
 
   const saveNew=async()=>{setSaving(true);const auto=serializeAuto(automationName,nodes,edges,isActive);const next=[...library,auto];setLibrary(next);saveLibrary(next);setLastSaved(JSON.stringify({nodes,edges,name:automationName}));setSaving(false);};
   const overwriteExisting=async()=>{setSaving(true);const auto=serializeAuto(automationName,nodes,edges,isActive);const next=library.map(a=>a.name===automationName?{...auto,id:a.id}:a);setLibrary(next);saveLibrary(next);setLastSaved(JSON.stringify({nodes,edges,name:automationName}));setSaving(false);};
@@ -501,7 +694,7 @@ function App(){
           <span style={S.logo}>⬡</span>
           <input value={automationName} onChange={e=>setAutomationName(e.target.value)} style={S.nameInput}/>
           {isDirty&&<span title="Unsaved changes" style={{width:6,height:6,borderRadius:3,background:"#F39C12",flexShrink:0,marginLeft:-4}}/>}
-          <span style={{...S.badge,background:connected?"#2ECC7115":apiConnecting?"#3498DB15":"#6C63FF15",color:connected?"#52D98C":apiConnecting?"#5DADE2":"#9B8FFF",borderColor:connected?"#2ECC7133":apiConnecting?"#3498DB33":"#6C63FF33"}}>{apiConnecting?"connecting…":connected?`✓ ${boards.length} boards`:"not connected"}</span>
+          <span style={{...S.badge,background:connected?"#2ECC7115":apiConnecting?"#3498DB15":"#6C63FF15",color:connected?"#52D98C":apiConnecting?"#5DADE2":"#9B8FFF",borderColor:connected?"#2ECC7133":apiConnecting?"#3498DB33":"#6C63FF33"}}>{apiConnecting?"connecting…":connected?`✓ ${boards.length} boards · ${workspaces.length} ws`:"not connected"}</span>
           {deployStatus!=="draft"&&<span style={{...S.badge,background:deployStatus==="active"?"#2ECC7115":"#3498DB15",color:deployStatus==="active"?"#52D98C":"#5DADE2",borderColor:deployStatus==="active"?"#2ECC7133":"#3498DB33"}}>{deployStatus==="active"?"● live":"● deployed"}</span>}
         </div>
         <div style={S.tM}>
@@ -524,15 +717,15 @@ function App(){
 
       <div style={S.body}>
         <div style={S.sidebar}>
-          {panel==="deploy"&&<DeployPanel nodes={nodes} edges={edges} automationName={automationName} isActive={isActive} onDeploySuccess={onDeploySuccess}/>}
+          {panel==="deploy"&&<DeployPanel nodes={nodes} edges={edges} automationName={automationName} isActive={isActive} onDeploySuccess={onDeploySuccess} boards={boards} mondayToken={mondayToken}/>}
           {panel==="library"&&<LibraryPanel library={library} onLoad={loadAuto} onDelete={deleteAuto} onExportAll={exportAll} onImport={importAuto} currentName={automationName} onSaveNew={saveNew} onOverwrite={overwriteExisting} saving={saving}/>}
-          {panel==="settings"&&<SettingsPanel mondayToken={mondayToken} setMondayToken={setMondayToken} anthropicKey={anthropicKey} setAnthropicKey={setAnthropicKey} boards={boards} onConnect={connectMonday} connecting={apiConnecting} connectError={connectError}/>}
+          {panel==="settings"&&<SettingsPanel mondayToken={mondayToken} setMondayToken={setMondayToken} anthropicKey={anthropicKey} setAnthropicKey={setAnthropicKey} boards={boards} workspaces={workspaces} onConnect={connectMonday} connecting={apiConnecting} connectError={connectError}/>}
           {panel==="config"&&selNode&&(
             <div style={S.cfgPanel}>
               <div style={S.cfgHead}><div style={{display:"flex",alignItems:"center",gap:7}}><span style={{width:7,height:7,borderRadius:4,background:NC[selNode.type].border,display:"inline-block",flexShrink:0}}/><span style={{fontSize:9,color:NC[selNode.type].label,letterSpacing:1,textTransform:"uppercase",fontWeight:700}}>{selNode.type} · {selNode.subtype.replace(/_/g," ")}</span></div><button style={S.closeBtn} onClick={()=>setPanel("palette")}>×</button></div>
               <div style={S.cfgLR}><label style={S.fLbl}>Label</label><input style={S.lblInp} value={selNode.label} onChange={e=>setNodes(ns=>ns.map(n=>n.id===selNode.id?{...n,label:e.target.value}:n))}/></div>
               <div style={{height:"0.5px",background:"#181825"}}/>
-              <div style={S.cfgBody}><ConfigForm node={selNode} onChange={cfg=>updCfg(selNode.id,cfg)} boards={boards}/></div>
+              <div style={S.cfgBody}><ConfigForm node={selNode} onChange={cfg=>updCfg(selNode.id,cfg)} boards={boards} workspaces={workspaces}/></div>
               <div style={S.cfgFoot}><button style={S.delFull} onClick={()=>delNode(selNode.id)}>Remove node</button></div>
             </div>
           )}
