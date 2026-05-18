@@ -233,6 +233,7 @@ function resolveTokens(str, ctx) {
 async function execAction(node, ctx, token) {
   const c = node.config || {};
   const useToken = token || process.env.MONDAY_TOKEN;
+  console.log(`Executing action: ${node.subtype} on board ${c.board}`);
   try {
     switch (node.subtype) {
 
@@ -415,6 +416,7 @@ async function runAutomation(auto, eventCtx) {
 
     } else if (node.type === "condition") {
       const port = evalCondition(node, ctx);
+      console.log(`Condition "${node.label}" → took "${port}" path`);
       out.filter(e => e.fromPort === port).forEach(e => {
         const n = nodes.find(x => x.id === e.to);
         if (n) queue.push({ node: n, ctx: { ...ctx } });
@@ -564,16 +566,26 @@ export async function handler(event) {
         if (item) {
           ctx.itemName = item.name || ctx.itemName;
           item.column_values.forEach(cv => {
-            const v = extractValue(cv.value) || cv.text || "";
+            // For formula columns, cv.value is often null — use cv.text which has the display value
+            // For number columns, cv.text has the formatted value, cv.value has raw JSON
+            let v = "";
+            if (cv.type === "formula") {
+              // Formula columns: text = display value e.g. "42.56%", value may be null
+              v = cv.text || "";
+            } else {
+              // All other columns: try extracting from value JSON first, fall back to text
+              v = extractValue(cv.value) || cv.text || "";
+            }
             ctx.columnValues[cv.id] = v;
           });
+          // Log all fetched values so we can debug
+          console.log("Live column values fetched:", JSON.stringify(ctx.columnValues));
           // If the triggered column's live value is available, prefer it
           if (ctx.columnId && ctx.columnValues[ctx.columnId]) {
             ctx.newValue   = ctx.columnValues[ctx.columnId];
             ctx.itemStatus = ctx.columnValues[ctx.columnId];
           }
         }
-        console.log("Fetched live column values for item", ctx.itemId);
       } catch(e) {
         console.log("Could not fetch live column values:", e.message);
       }
