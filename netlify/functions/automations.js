@@ -241,23 +241,26 @@ async function execAction(node, ctx, token) {
         const name = resolveTokens(c.groupName || "New Group", ctx);
 
         if (c.templateGroupId) {
-          // Duplicate an existing template group then rename it
+          // Duplicate the template group (copies all items and structure intact)
           const dupData = await mondayGQL(
             `mutation($b:ID!,$g:String!){duplicate_group(board_id:$b,group_id:$g,add_to_top:true){id title}}`,
             { b: c.board, g: c.templateGroupId },
             useToken
           );
           const newGroupId = dupData.duplicate_group.id;
-          // Small delay to ensure monday.com has committed the duplicate
-          await new Promise(r => setTimeout(r, 1500));
-          // Rename — monday.com uses "title" as the group_attribute value
+          console.log(`Duplicated template ${c.templateGroupId} → ${newGroupId}, waiting to rename...`);
+
+          // Wait for monday.com to fully commit the duplicated group before renaming
+          // update_group syntax confirmed working: group_attribute:title, new_value:name
+          await new Promise(r => setTimeout(r, 4000));
+
           const renameData = await mondayGQL(
             `mutation($b:ID!,$g:String!,$n:String!){update_group(board_id:$b,group_id:$g,group_attribute:title,new_value:$n){id title}}`,
             { b: c.board, g: newGroupId, n: name },
             useToken
           );
           const finalName = renameData?.update_group?.title || name;
-          console.log(`Duplicated template → renamed to "${finalName}" (${newGroupId})`);
+          console.log(`Renamed to "${finalName}"`);
           return { ok: true, result: `Created group "${finalName}" from template`, newGroupId, newGroupBoard: c.board };
         }
 
