@@ -239,12 +239,33 @@ async function execAction(node, ctx, token) {
 
       case "create_group": {
         const name = resolveTokens(c.groupName || "New Group", ctx);
+
+        if (c.templateGroupId) {
+          // Duplicate an existing template group then rename it
+          const dupData = await mondayGQL(
+            `mutation($b:ID!,$g:String!,$n:Boolean!){duplicate_group(board_id:$b,group_id:$g,add_to_top:$n){id title}}`,
+            { b: c.board, g: c.templateGroupId, n: true },
+            useToken
+          );
+          const newGroupId = dupData.duplicate_group.id;
+          // Rename the duplicated group to the resolved name
+          await mondayGQL(
+            `mutation($b:ID!,$g:String!,$n:String!){update_group(board_id:$b,group_id:$g,group_attribute:title,new_value:$n){id title}}`,
+            { b: c.board, g: newGroupId, n: name },
+            useToken
+          );
+          console.log(`Duplicated template group "${c.templateGroupId}" → new group "${name}" (${newGroupId})`);
+          return { ok: true, result: `Created group "${name}" from template`, newGroupId, newGroupBoard: c.board };
+        }
+
+        // No template — create a blank group
         const data = await mondayGQL(
           `mutation($b:ID!,$n:String!){create_group(board_id:$b,group_name:$n){id title}}`,
           { b: c.board, n: name },
           useToken
         );
-        return { ok: true, result: `Created group "${data.create_group.title}"` };
+        console.log(`Created group "${data.create_group.title}" with id ${data.create_group.id}`);
+        return { ok: true, result: `Created group "${data.create_group.title}"`, newGroupId: data.create_group.id, newGroupBoard: c.board };
       }
 
       case "create_item": {
@@ -378,7 +399,11 @@ async function execAction(node, ctx, token) {
           { b: parseInt(c.board || c.resultBoard || ctx.boardId), i: parseInt(ctx.itemId), c: c.resultCol, v: writeVal },
           useToken
         );
-        return { ok: true, result: `Formula result: ${result} → wrote to column "${c.resultCol}"` };
+        console.log(`Formula result: ${result} written to column "${c.resultCol}"`);
+        // Return formulaResult and resultCol so the runner can update ctx.columnValues
+        // This allows a downstream Condition to compare against the formula result
+        // without needing to re-fetch from monday.com (avoiding race conditions)
+        return { ok: true, result: `Formula result: ${result} → wrote to column "${c.resultCol}"`, formulaResult: result, resultCol: c.resultCol };
       }
 
       default:
@@ -424,11 +449,39 @@ async function runAutomation(auto, eventCtx) {
 
     } else if (node.type === "action") {
       const result = await execAction(node, ctx, token);
-      const next   = {
+      const next = {
         ...ctx,
-        ...(result.aiOutput  ? { aiOutput: result.aiOutput }  : {}),
-        ...(result.newItemId ? { itemId:   result.newItemId } : {}),
+        ...(result.aiOutput    ? { aiOutput:     result.aiOutput }     : {}),
+        ...(result.newItemId   ? { itemId:        result.newItemId }    : {}),
+        ...(result.newGroupId  ? { groupId:       result.newGroupId }   : {}),
+        ...(result.newGroupBoard ? { groupBoard:  result.newGroupBoard } : {}),
       };
+      if (result.formulaResult != null && result.resultCol) {
+        next.columnValues = {
+          ...ctx.columnValues,
+          [result.resultCol]: String(result.formulaResult),
+        };
+        console.log(`Injected formula result into ctx.columnValues[${result.resultCol}] = ${result.formulaResult}`);
+      }
+      out.forEach(e => {
+        const n = nodes.find(x => x.id === e.to);
+        if (n) queue.push({ node: n, ctx: next });
+      });
+
+    } else if (node.type === "formula") {
+      // Formula nodes run through execAction just like actions
+      // but are a separate node type so they get their own branch
+      const result = await execAction(node, ctx, token);
+      console.log(`Formula node result: ${result.result}`);
+      const next = { ...ctx };
+      // Inject the computed value into columnValues for downstream conditions
+      if (result.formulaResult != null && result.resultCol) {
+        next.columnValues = {
+          ...ctx.columnValues,
+          [result.resultCol]: String(result.formulaResult),
+        };
+        console.log(`Injected formula result into ctx.columnValues[${result.resultCol}] = ${result.formulaResult}`);
+      }
       out.forEach(e => {
         const n = nodes.find(x => x.id === e.to);
         if (n) queue.push({ node: n, ctx: next });

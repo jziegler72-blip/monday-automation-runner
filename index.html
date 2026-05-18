@@ -294,7 +294,18 @@ const resolveTokens = (str, ctx={}) => (str||"")
 async function execActionBrowser(node, ctx, token, anthropicKey) {
   const c=node.config||{};
   switch(node.subtype){
-    case"create_group":{const name=resolveTokens(c.groupName||"New Group",ctx);const data=await mondayGQL(token,`mutation($b:ID!,$n:String!){create_group(board_id:$b,group_name:$n){id title}}`,{b:c.board,n:name});return{ok:true,result:`Created group "${data.create_group.title}"` };}
+    case"create_group":{
+      const name=resolveTokens(c.groupName||"New Group",ctx);
+      if(c.groupMode==="template"&&c.templateGroupId){
+        // Duplicate template group then rename
+        const dupData=await mondayGQL(token,`mutation($b:ID!,$g:String!,$n:Boolean!){duplicate_group(board_id:$b,group_id:$g,add_to_top:$n){id title}}`,{b:c.board,g:c.templateGroupId,n:true});
+        const newGroupId=dupData.duplicate_group.id;
+        await mondayGQL(token,`mutation($b:ID!,$g:String!,$n:String!){update_group(board_id:$b,group_id:$g,group_attribute:title,new_value:$n){id title}}`,{b:c.board,g:newGroupId,n:name});
+        return{ok:true,result:`Created group "${name}" from template`};
+      }
+      const data=await mondayGQL(token,`mutation($b:ID!,$n:String!){create_group(board_id:$b,group_name:$n){id title}}`,{b:c.board,n:name});
+      return{ok:true,result:`Created group "${data.create_group.title}"`};
+    }
     case"create_item":{const name=resolveTokens(c.itemName||"New Item",ctx);const vars={b:parseInt(c.board),n:name,cv:"{}"};if(c.group)vars.g=c.group;const data=await mondayGQL(token,`mutation($b:Int!,$n:String!,$g:String,$cv:JSON!){create_item(board_id:$b,item_name:$n,group_id:$g,column_values:$cv){id name}}`,vars);return{ok:true,result:`Created item "${data.create_item.name}"`};}
     case"change_col":{if(!ctx.itemId)return{ok:false,result:"No item ID in test context"};await mondayGQL(token,`mutation($b:Int!,$i:Int!,$c:String!,$v:JSON!){change_column_value(board_id:$b,item_id:$i,column_id:$c,value:$v){id}}`,{b:parseInt(c.board),i:parseInt(ctx.itemId),c:c.column,v:JSON.stringify({label:c.toValue})});return{ok:true,result:`Set "${c.column}" → "${c.toValue}"`};}
     case"move_item":{if(!ctx.itemId)return{ok:false,result:"No item ID in test context"};await mondayGQL(token,`mutation($i:Int!,$g:String!){move_item_to_group(item_id:$i,group_id:$g){id}}`,{i:parseInt(ctx.itemId),g:c.group});return{ok:true,result:`Moved to group "${c.group}"`};}
@@ -347,7 +358,7 @@ const DEF_CFG={
   date_reached:{board:"",column:"",offset:"0"},column_changed:{board:"",column:""},
   if_else:{board:"",column:"",operator:"equals",value:"",compareMode:"fixed",compareColumn:""},filter:{board:"",column:"",operator:"equals",value:"",compareMode:"fixed",compareColumn:""},
   notify:{who:"assignee",message:""},change_col:{board:"",column:"",toValue:""},
-  create_item:{board:"",group:"",itemName:"{{item.name}}"},create_group:{board:"",groupName:"Completed — {{item.name}}"},
+  create_item:{board:"",group:"",itemName:"{{item.name}}"},create_group:{board:"",groupName:"{{item.name}} — Project",groupMode:"blank",templateGroupId:""},
   move_item:{board:"",group:""},http_request:{method:"POST",url:"",body:'{"item":"{{item.name}}"}'},
   ai_step:{prompt:"Summarize {{item.name}} and suggest next steps."},
   wait_time:{amount:"1",unit:"business days"},wait_event:{board:"",column:"",operator:"equals",value:""},
@@ -741,9 +752,55 @@ function ConfigForm({node,onChange,boards,workspaces}) {
     case"create_item":return<><CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Create item on board"/>{c.board&&<CfgGSel groups={groups} value={c.group||""} onChange={v=>set("group",v)} label="In group"/>}<div className="field-row"><label className="field-label">Item name</label><input className="field-input" value={c.itemName||""} onChange={e=>set("itemName",e.target.value)} placeholder="{{item.name}} — copy"/></div><CfgTokens tokens={["{{item.name}}","{{item.status}}","{{today}}"]} current={c.itemName} onInsert={v=>set("itemName",v)}/></>;
     case"create_group":return<>
       <CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Create group on board"/>
-      <div className="field-row"><label className="field-label">Group name</label><input className="field-input" value={c.groupName||""} onChange={e=>set("groupName",e.target.value)} placeholder="Completed — {{item.name}}"/></div>
-      <CfgTokens tokens={["{{item.name}}","{{item.status}}","{{today}}"]} current={c.groupName} onInsert={v=>set("groupName",v)}/>
-      {c.groupName&&<div className="field-row"><label className="field-label">Preview</label><div style={{padding:"8px 12px",background:"var(--gray-50)",borderRadius:6,fontSize:13,color:"var(--monday-purple)",fontWeight:500}}>{resolveTokens(c.groupName,{itemName:"Project Alpha"})}</div></div>}
+      {c.board&&<>
+        {/* Mode toggle — blank group or duplicate template */}
+        <div className="field-row">
+          <label className="field-label">Group type</label>
+          <div style={{display:"flex",gap:6}}>
+            {[["blank","New blank group"],["template","Duplicate a template group"]].map(([mode,label])=>(
+              <button key={mode} type="button"
+                style={{flex:1,padding:"7px 10px",borderRadius:6,fontSize:12,fontWeight:600,cursor:"pointer",
+                  border:`1.5px solid ${(c.groupMode||"blank")===mode?"var(--monday-purple)":"var(--gray-200)"}`,
+                  background:(c.groupMode||"blank")===mode?"var(--monday-purple-light)":"white",
+                  color:(c.groupMode||"blank")===mode?"var(--monday-purple)":"var(--gray-500)"}}
+                onClick={()=>set("groupMode",mode)}>{label}</button>
+            ))}
+          </div>
+        </div>
+
+        {/* Template group picker */}
+        {c.groupMode==="template"&&<>
+          <div className="field-row">
+            <label className="field-label">Template group</label>
+            <select className="field-input" value={c.templateGroupId||""} onChange={e=>set("templateGroupId",e.target.value)}>
+              <option value="">Select template group…</option>
+              {groups.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}
+            </select>
+            <p className="hint">This group will be duplicated — all its items, columns, and structure copy over automatically. The original template stays untouched.</p>
+          </div>
+        </>}
+
+        {/* Group name — used for both modes */}
+        <div className="field-row">
+          <label className="field-label">{c.groupMode==="template"?"Name the new group":"Group name"}</label>
+          <input className="field-input" value={c.groupName||""} onChange={e=>set("groupName",e.target.value)}
+            placeholder={c.groupMode==="template"?"{{item.name}} — Project":"Completed — {{item.name}}"}/>
+        </div>
+        <CfgTokens tokens={["{{item.name}}","{{item.status}}","{{today}}"]} current={c.groupName} onInsert={v=>set("groupName",v)}/>
+        {c.groupName&&(
+          <div className="field-row">
+            <label className="field-label">Preview</label>
+            <div style={{padding:"8px 12px",background:"var(--gray-50)",borderRadius:6,fontSize:13,color:"var(--monday-purple)",fontWeight:500}}>
+              {resolveTokens(c.groupName,{itemName:"Acme Corp"})}
+              {c.groupMode==="template"&&c.templateGroupId&&(
+                <span style={{fontSize:11,color:"var(--gray-300)",marginLeft:8}}>
+                  (copy of "{groups.find(g=>g.id===c.templateGroupId)?.name||"template"}")
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+      </>}
     </>;
     case"move_item":return<><CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Target board"/>{c.board&&<CfgGSel groups={groups} value={c.group||""} onChange={v=>set("group",v)} label="Move item to group"/>}<p className="hint">Moves the item that triggered this automation.</p></>;
     case"http_request":return<>
