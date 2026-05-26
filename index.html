@@ -435,7 +435,7 @@ function nodeSummary(node, boards) {
 }
 
 // ─── Workspace board picker ────────────────────────────────────────────────────
-function BoardPicker({value, onChange, boards, workspaces, label="Board"}) {
+const BoardPicker = React.memo(function BoardPicker({value, onChange, boards, workspaces, label="Board"}) {
   const [open,setOpen]=useState(false);
   const [search,setSearch]=useState("");
   const [openWs,setOpenWs]=useState({});
@@ -632,7 +632,7 @@ function CfgTokens({tokens,current,onInsert}) {
     </div>
   );
 }
-function CfgBP({boards,workspaces,value,onChange,label="Board"}) {
+const CfgBP = React.memo(function CfgBP({boards,workspaces,value,onChange,label="Board"}) {
   if(boards.length===0) return(
     <div className="field-row"><div style={{padding:"10px 12px",background:"var(--gray-50)",borderRadius:6,fontSize:13,color:"var(--gray-300)"}}>Connect monday.com in Settings to load boards</div></div>
   );
@@ -640,7 +640,7 @@ function CfgBP({boards,workspaces,value,onChange,label="Board"}) {
 }
 
 // Lazy-loading item selector — fetches items when boardId is available
-function CfgItemSel({token,boardId,value,onChange,label="Filter to item (optional)",placeholder="Any item — fires for all"}) {
+const CfgItemSel = React.memo(function CfgItemSel({token,boardId,value,onChange,label="Filter to item (optional)",placeholder="Any item — fires for all"}) {
   const [items,setItems]=useState([]);
   const [loading,setLoading]=useState(false);
   useEffect(()=>{
@@ -662,7 +662,7 @@ function CfgItemSel({token,boardId,value,onChange,label="Filter to item (optiona
 }
 
 // Lazy-loading sub-item selector — fetches sub-items when parentItemId is available
-function CfgSubItemSel({token,parentItemId,value,onChange,onColsLoaded,label="Sub-item"}) {
+const CfgSubItemSel = React.memo(function CfgSubItemSel({token,parentItemId,value,onChange,onColsLoaded,label="Sub-item"}) {
   const [subitems,setSubitems]=useState([]);
   const [loading,setLoading]=useState(false);
   useEffect(()=>{
@@ -687,7 +687,7 @@ function CfgSubItemSel({token,parentItemId,value,onChange,onColsLoaded,label="Su
 }
 
 // ─── Config form ──────────────────────────────────────────────────────────────
-function ConfigForm({node,onChange,boards,workspaces,mondayToken}) {
+const ConfigForm = React.memo(function ConfigForm({node,onChange,boards,workspaces,mondayToken}) {
   const c=node.config||{};
   const set=(k,v)=>onChange({...c,[k]:v});
   const board=boards.find(b=>b.id===c.board);
@@ -1855,7 +1855,8 @@ function App() {
   };
   const delNode=id=>{setNodes(ns=>ns.filter(n=>n.id!==id));setEdges(es=>es.filter(e=>e.from!==id&&e.to!==id));if(selected===id){setSelected(null);setPanel("palette");}};
   const delEdge=id=>setEdges(es=>es.filter(e=>e.id!==id));
-  const updCfg=(nodeId,cfg)=>setNodes(ns=>ns.map(n=>n.id===nodeId?{...n,config:cfg}:n));
+  const updCfg=useCallback((nodeId,cfg)=>setNodes(ns=>ns.map(n=>n.id===nodeId?{...n,config:cfg}:n)),[]);
+  const selNodeOnChange=useCallback((cfg)=>{ if(selNode) updCfg(selNode.id,cfg); },[selNode?.id,updCfg]);
 
   const selNode=nodes.find(n=>n.id===selected);
   const connected=boards.length>0;
@@ -1896,7 +1897,7 @@ function App() {
         </div>
         {/* Config form */}
         <div style={{flex:1,overflowY:"auto",padding:"16px 20px"}}>
-          <ConfigForm node={selNode} onChange={cfg=>updCfg(selNode.id,cfg)} boards={boards} workspaces={workspaces} mondayToken={mondayToken}/>
+          <ConfigForm node={selNode} onChange={selNodeOnChange} boards={boards} workspaces={workspaces} mondayToken={mondayToken}/>
         </div>
       </div>
     );
