@@ -390,8 +390,11 @@ async function execAction(node, ctx, token) {
         );
         const colVals = {};
         (itemData?.items?.[0]?.column_values || []).forEach(cv => {
-          colVals[cv.id] = parseFloat(cv.text) || cv.text || 0;
+          // Try numeric first, fall back to text string
+          const num = parseFloat(cv.text);
+          colVals[cv.id] = !isNaN(num) ? num : (cv.text || 0);
         });
+        console.log(`Formula colVals for item ${ctx.itemId}:`, JSON.stringify(colVals));
 
         let result;
         if (node.subtype === "formula_math") {
@@ -425,17 +428,22 @@ async function execAction(node, ctx, token) {
 
         // Write result back to the target column
         if (!c.resultCol) return { ok: false, result: "No result column configured" };
+
+        // monday.com requires different JSON format per column type:
+        // Numbers: {"value": 42}   Text: just the string as JSON
         const isNumber = typeof result === "number";
-        const writeVal = isNumber ? JSON.stringify(result) : JSON.stringify(String(result));
+        const writeVal = isNumber
+          ? JSON.stringify({ value: result })
+          : JSON.stringify(String(result));
+
+        console.log(`Writing formula result ${result} to column ${c.resultCol} on board ${c.board || ctx.boardId} item ${ctx.itemId}`);
+
         await mondayGQL(
           `mutation($b:Int!,$i:Int!,$c:String!,$v:JSON!){change_column_value(board_id:$b,item_id:$i,column_id:$c,value:$v){id}}`,
-          { b: parseInt(c.board || c.resultBoard || ctx.boardId), i: parseInt(ctx.itemId), c: c.resultCol, v: writeVal },
+          { b: parseInt(c.board || ctx.boardId), i: parseInt(ctx.itemId), c: c.resultCol, v: writeVal },
           useToken
         );
         console.log(`Formula result: ${result} written to column "${c.resultCol}"`);
-        // Return formulaResult and resultCol so the runner can update ctx.columnValues
-        // This allows a downstream Condition to compare against the formula result
-        // without needing to re-fetch from monday.com (avoiding race conditions)
         return { ok: true, result: `Formula result: ${result} → wrote to column "${c.resultCol}"`, formulaResult: result, resultCol: c.resultCol };
       }
 
