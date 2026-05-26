@@ -119,22 +119,36 @@ async function registerWebhooks(auto, siteUrl) {
   const token = auto.monday_token || auto.mondayToken || process.env.MONDAY_TOKEN;
   if (!token || !siteUrl) return;
   const webhookUrl = `${siteUrl}/api/webhook`;
-  const eventMap   = {
+
+  // Event map — sub-item watchers use different event types
+  const eventMap = {
     status_change:  "change_status_column_value",
     item_created:   "create_pulse",
     column_changed: "change_column_value",
     date_reached:   "when_date_arrived",
   };
+  const subItemEventMap = {
+    status_change:  "change_subitem_column_value",
+    column_changed: "change_subitem_column_value",
+    item_created:   "create_subitem",
+  };
+
   for (const node of (auto.nodes || []).filter(n => n.type === "trigger")) {
-    const c     = node.config || {};
-    const event = eventMap[node.subtype];
-    if (!c.board || !event) continue;
+    const c = node.config || {};
+    if (!c.board) continue;
+
+    // Choose correct event type based on whether watching sub-items
+    const map   = c.watchSubItems ? subItemEventMap : eventMap;
+    const event = map[node.subtype];
+    if (!event) continue;
+
     try {
       await mondayGQL(
         `mutation($b:ID!,$u:String!,$e:WebhookEventType!){create_webhook(board_id:$b,url:$u,event:$e){id}}`,
         { b: c.board, u: webhookUrl, e: event },
         token
       );
+      console.log(`Registered ${c.watchSubItems?"sub-item":"item"} webhook: ${event} on board ${c.board}`);
     } catch(e) {
       console.log("Webhook register note:", e.message);
     }
@@ -148,24 +162,37 @@ function triggerMatches(trigger, ctx) {
     triggerBoard: c.board, ctxBoard: ctx.boardId,
     triggerColumn: c.column, ctxColumn: ctx.columnId,
     triggerValue: c.toValue, ctxValue: ctx.newValue,
+    watchSubItems: c.watchSubItems, ctxParentId: ctx.parentItemId,
   }));
+
+  // Board must always match
+  if (String(c.board) !== ctx.boardId) return false;
+
+  // Sub-item mode: require a parentItemId in context
+  // and optionally filter to specific parent or sub-item
+  if (c.watchSubItems) {
+    if (!ctx.parentItemId) return false;
+    if (c.parentItemId && String(c.parentItemId) !== String(ctx.parentItemId)) return false;
+    if (c.subItemId && String(c.subItemId) !== String(ctx.itemId)) return false;
+  } else {
+    // Main item mode: reject if this is a sub-item event
+    if (ctx.parentItemId) return false;
+  }
+
   switch (trigger.subtype) {
     case "status_change":
-      return String(c.board) === ctx.boardId
-        && (!c.column  || c.column  === ctx.columnId)
-        && (!c.toValue || c.toValue === ctx.newValue);
+      return (!c.column  || c.column  === ctx.columnId)
+          && (!c.toValue || c.toValue === ctx.newValue);
     case "item_created":
-      return String(c.board) === ctx.boardId && !ctx.columnId;
+      return !ctx.columnId;
     case "column_changed":
-      if (String(c.board) !== ctx.boardId) return false;
-      // If a specific column is configured, it MUST match — never run for other columns
       if (c.column && c.column !== ctx.columnId) {
         console.log(`column_changed: skipping — trigger column ${c.column} ≠ event column ${ctx.columnId}`);
         return false;
       }
       return true;
     case "date_reached":
-      return String(c.board) === ctx.boardId;
+      return true;
     default:
       return false;
   }
@@ -591,16 +618,17 @@ export async function handler(event) {
     const rawNewValue = extractValue(ev.value);
 
     const ctx = {
-      boardId:    String(ev.boardId || ""),
-      itemId:     String(ev.pulseId || ev.itemId || ""),
-      itemName:   ev.pulseName || ev.itemName || "",
-      columnId:   ev.columnId || "",
-      newValue:   rawNewValue,
-      itemStatus: rawNewValue, // used by condition evaluator
-      userId:     String(ev.userId || ""),
-      aiOutput:   "",
-      // Store column values map — populated lazily below if needed
+      boardId:      String(ev.boardId || ""),
+      itemId:       String(ev.pulseId || ev.itemId || ""),
+      itemName:     ev.pulseName || ev.itemName || "",
+      columnId:     ev.columnId || "",
+      newValue:     rawNewValue,
+      itemStatus:   rawNewValue,
+      userId:       String(ev.userId || ""),
+      aiOutput:     "",
       columnValues: {},
+      // Sub-item events include parentItemId — used to filter sub-item triggers
+      parentItemId: ev.parentItemId ? String(ev.parentItemId) : null,
     };
 
     console.log("Parsed ctx:", JSON.stringify({...ctx, columnValues:"(lazy)"}));

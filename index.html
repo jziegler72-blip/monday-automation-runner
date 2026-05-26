@@ -247,6 +247,21 @@ async function mondayGQL(token, query, variables={}) {
   return json.data;
 }
 
+// Lazy load items for a specific board — called when board is selected in trigger config
+async function fetchItems(token, boardId) {
+  const data = await mondayGQL(token, `query($b:ID!){boards(ids:[$b]){items_page(limit:100){items{id name column_values{id text type}}}}}`, { b: boardId });
+  return data?.boards?.[0]?.items_page?.items || [];
+}
+
+// Lazy load sub-items for a specific parent item
+async function fetchSubItems(token, itemId) {
+  const data = await mondayGQL(token, `query($i:ID!){items(ids:[$i]){subitems{id name column_values{id text type}board{columns{id title type settings_str}}}}}`, { i: itemId });
+  const subitems = data?.items?.[0]?.subitems || [];
+  // Extract columns from first subitem's board
+  const subCols = subitems[0]?.board?.columns || [];
+  return { subitems, subCols };
+}
+
 async function fetchBoardData(token) {
   const wsData = await mondayGQL(token, `{ workspaces { id name } }`);
   const workspaces = wsData.workspaces || [];
@@ -297,11 +312,12 @@ async function execActionBrowser(node, ctx, token, anthropicKey) {
     case"create_group":{
       const name=resolveTokens(c.groupName||"New Group",ctx);
       if(c.groupMode==="template"&&c.templateGroupId){
-        // Duplicate template group then rename
-        const dupData=await mondayGQL(token,`mutation($b:ID!,$g:String!,$n:Boolean!){duplicate_group(board_id:$b,group_id:$g,add_to_top:$n){id title}}`,{b:c.board,g:c.templateGroupId,n:true});
+        const dupData=await mondayGQL(token,`mutation($b:ID!,$g:String!){duplicate_group(board_id:$b,group_id:$g,add_to_top:true){id title}}`,{b:c.board,g:c.templateGroupId});
         const newGroupId=dupData.duplicate_group.id;
-        await mondayGQL(token,`mutation($b:ID!,$g:String!,$n:String!){update_group(board_id:$b,group_id:$g,group_attribute:title,new_value:$n){id title}}`,{b:c.board,g:newGroupId,n:name});
-        return{ok:true,result:`Created group "${name}" from template`};
+        await new Promise(r=>setTimeout(r,4000));
+        const renameData=await mondayGQL(token,`mutation($b:ID!,$g:String!,$n:String!){update_group(board_id:$b,group_id:$g,group_attribute:title,new_value:$n){id title}}`,{b:c.board,g:newGroupId,n:name});
+        const finalName=renameData?.update_group?.title||name;
+        return{ok:true,result:`Created group "${finalName}" from template`};
       }
       const data=await mondayGQL(token,`mutation($b:ID!,$n:String!){create_group(board_id:$b,group_name:$n){id title}}`,{b:c.board,n:name});
       return{ok:true,result:`Created group "${data.create_group.title}"`};
@@ -354,8 +370,8 @@ const TEMPLATES = {
 };
 
 const DEF_CFG={
-  status_change:{board:"",column:"",toValue:""},item_created:{board:""},
-  date_reached:{board:"",column:"",offset:"0"},column_changed:{board:"",column:""},
+  status_change:{board:"",column:"",toValue:"",watchSubItems:false,parentItemId:"",subItemId:""},item_created:{board:"",watchSubItems:false},
+  date_reached:{board:"",column:"",offset:"0"},column_changed:{board:"",column:"",watchSubItems:false,parentItemId:"",subItemId:""},
   if_else:{board:"",column:"",operator:"equals",value:"",compareMode:"fixed",compareColumn:""},filter:{board:"",column:"",operator:"equals",value:"",compareMode:"fixed",compareColumn:""},
   notify:{who:"assignee",message:""},change_col:{board:"",column:"",toValue:""},
   create_item:{board:"",group:"",itemName:"{{item.name}}"},create_group:{board:"",groupName:"{{item.name}} — Project",groupMode:"blank",templateGroupId:""},
@@ -623,8 +639,55 @@ function CfgBP({boards,workspaces,value,onChange,label="Board"}) {
   return <BoardPicker value={value||""} onChange={onChange} boards={boards} workspaces={workspaces} label={label}/>;
 }
 
+// Lazy-loading item selector — fetches items when boardId is available
+function CfgItemSel({token,boardId,value,onChange,label="Filter to item (optional)",placeholder="Any item — fires for all"}) {
+  const [items,setItems]=useState([]);
+  const [loading,setLoading]=useState(false);
+  useEffect(()=>{
+    if(!boardId||!token){setItems([]);return;}
+    setLoading(true);
+    fetchItems(token,boardId).then(its=>{setItems(its);setLoading(false);}).catch(()=>setLoading(false));
+  },[boardId,token]);
+  if(!boardId) return null;
+  return(
+    <div className="field-row">
+      <label className="field-label">{label}</label>
+      <select className="field-input" value={value||""} onChange={e=>onChange(e.target.value)}>
+        <option value="">{loading?"Loading items…":placeholder}</option>
+        {items.map(it=><option key={it.id} value={it.id}>{it.name}</option>)}
+      </select>
+      <p className="hint">Leave blank to fire for any item. Select a specific item to only fire for that item and its sub-items.</p>
+    </div>
+  );
+}
+
+// Lazy-loading sub-item selector — fetches sub-items when parentItemId is available
+function CfgSubItemSel({token,parentItemId,value,onChange,onColsLoaded,label="Sub-item"}) {
+  const [subitems,setSubitems]=useState([]);
+  const [loading,setLoading]=useState(false);
+  useEffect(()=>{
+    if(!parentItemId||!token){setSubitems([]);return;}
+    setLoading(true);
+    fetchSubItems(token,parentItemId).then(({subitems:its,subCols})=>{
+      setSubitems(its);
+      if(onColsLoaded&&subCols) onColsLoaded(subCols);
+      setLoading(false);
+    }).catch(()=>setLoading(false));
+  },[parentItemId,token]);
+  if(!parentItemId) return null;
+  return(
+    <div className="field-row">
+      <label className="field-label">{label}</label>
+      <select className="field-input" value={value||""} onChange={e=>onChange(e.target.value)}>
+        <option value="">{loading?"Loading sub-items…":"Any sub-item"}</option>
+        {subitems.map(it=><option key={it.id} value={it.id}>{it.name}</option>)}
+      </select>
+    </div>
+  );
+}
+
 // ─── Config form ──────────────────────────────────────────────────────────────
-function ConfigForm({node,onChange,boards,workspaces}) {
+function ConfigForm({node,onChange,boards,workspaces,mondayToken}) {
   const c=node.config||{};
   const set=(k,v)=>onChange({...c,[k]:v});
   const board=boards.find(b=>b.id===c.board);
@@ -641,10 +704,59 @@ function ConfigForm({node,onChange,boards,workspaces}) {
   );
 
   switch(node.subtype){
-    case"status_change":return<><CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Watch board"/><CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Status column" flt={x=>x.type==="color"||x.type==="status"}/>{col&&<CfgVSel col={col} value={c.toValue||""} onChange={v=>set("toValue",v)} label="Changes to"/>}<p className="hint">Fires whenever this status changes to the selected value on any item.</p></>;
-    case"item_created":return<><CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Watch board"/><p className="hint">Fires when any new item is created on this board.</p></>;
+    case"status_change":return<>
+      <CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Watch board"/>
+      <CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Status column" flt={x=>x.type==="color"||x.type==="status"}/>
+      {col&&<CfgVSel col={col} value={c.toValue||""} onChange={v=>set("toValue",v)} label="Changes to"/>}
+      {/* Sub-item toggle */}
+      <div className="field-row">
+        <label className="field-label">Watch level</label>
+        <div style={{display:"flex",gap:6}}>
+          {[["false","Main items"],["true","Sub-items"]].map(([val,lbl])=>(
+            <button key={val} type="button"
+              style={{flex:1,padding:"7px 10px",borderRadius:6,fontSize:12,fontWeight:600,cursor:"pointer",
+                border:`1.5px solid ${String(c.watchSubItems||false)===val?"var(--monday-purple)":"var(--gray-200)"}`,
+                background:String(c.watchSubItems||false)===val?"var(--monday-purple-light)":"white",
+                color:String(c.watchSubItems||false)===val?"var(--monday-purple)":"var(--gray-500)"}}
+              onClick={()=>set("watchSubItems",val==="true")}>{lbl}</button>
+          ))}
+        </div>
+      </div>
+      {c.watchSubItems&&<>
+        <CfgItemSel token={mondayToken} boardId={c.board} value={c.parentItemId||""} onChange={v=>set("parentItemId",v)} label="Under parent item"/>
+        {c.parentItemId&&<CfgSubItemSel token={mondayToken} parentItemId={c.parentItemId} value={c.subItemId||""} onChange={v=>set("subItemId",v)} label="Specific sub-item (optional)"/>}
+        <p className="hint">Registers a sub-item webhook — fires when a sub-item changes, not the parent item.</p>
+      </>}
+    </>;
+    case"item_created":return<>
+      <CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Watch board"/>
+      <p className="hint">Fires when any new item is created on this board.</p>
+    </>;
     case"date_reached":return<><CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Watch board"/><CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Date column" flt={x=>x.type==="date"}/><div className="field-row"><label className="field-label">Offset (days before/after)</label><input className="field-input" type="number" value={c.offset||"0"} onChange={e=>set("offset",e.target.value)}/><p className="hint">0 = on the date. Negative = before, positive = after.</p></div></>;
-    case"column_changed":return<><CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Watch board"/><CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Column"/><p className="hint">Fires whenever this column changes to any value.</p></>;
+    case"column_changed":return<>
+      <CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Watch board"/>
+      <CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Column"/>
+      {/* Sub-item toggle */}
+      <div className="field-row">
+        <label className="field-label">Watch level</label>
+        <div style={{display:"flex",gap:6}}>
+          {[["false","Main items"],["true","Sub-items"]].map(([val,lbl])=>(
+            <button key={val} type="button"
+              style={{flex:1,padding:"7px 10px",borderRadius:6,fontSize:12,fontWeight:600,cursor:"pointer",
+                border:`1.5px solid ${String(c.watchSubItems||false)===val?"var(--monday-purple)":"var(--gray-200)"}`,
+                background:String(c.watchSubItems||false)===val?"var(--monday-purple-light)":"white",
+                color:String(c.watchSubItems||false)===val?"var(--monday-purple)":"var(--gray-500)"}}
+              onClick={()=>set("watchSubItems",val==="true")}>{lbl}</button>
+          ))}
+        </div>
+      </div>
+      {c.watchSubItems&&<>
+        <CfgItemSel token={mondayToken} boardId={c.board} value={c.parentItemId||""} onChange={v=>set("parentItemId",v)} label="Under parent item"/>
+        {c.parentItemId&&<CfgSubItemSel token={mondayToken} parentItemId={c.parentItemId} value={c.subItemId||""} onChange={v=>set("subItemId",v)} label="Specific sub-item (optional)"/>}
+        <p className="hint">Registers a sub-item webhook — fires when a sub-item changes, not the parent item.</p>
+      </>}
+      <p className="hint">Fires whenever this column changes to any value.</p>
+    </>;
     case"if_else":return<>
       <CfgBP boards={boards} workspaces={workspaces} value={c.board||""} onChange={v=>set("board",v)} label="Check board"/>
       <CfgColSel cols={cols} value={c.column||""} onChange={v=>set("column",v)} label="Column to check"/>
@@ -1784,7 +1896,7 @@ function App() {
         </div>
         {/* Config form */}
         <div style={{flex:1,overflowY:"auto",padding:"16px 20px"}}>
-          <ConfigForm node={selNode} onChange={cfg=>updCfg(selNode.id,cfg)} boards={boards} workspaces={workspaces}/>
+          <ConfigForm node={selNode} onChange={cfg=>updCfg(selNode.id,cfg)} boards={boards} workspaces={workspaces} mondayToken={mondayToken}/>
         </div>
       </div>
     );
