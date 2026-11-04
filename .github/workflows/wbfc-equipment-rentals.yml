@@ -1,0 +1,27 @@
+name: WBFC Equipment Rental Daily Check
+on:
+  schedule:
+    - cron: '15 14 * * *'
+  workflow_dispatch:
+    inputs:
+      apply_changes:
+        description: 'Write updates and send notifications (true/false)'
+        required: true
+        default: 'false'
+permissions:
+  contents: read
+jobs:
+  equipment-rentals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check equipment rentals
+        env:
+          MONDAY_API_TOKEN: ${{ secrets.MONDAY_API_TOKEN }}
+          MONDAY_EQUIPMENT_BOARD_ID: '18438455065'
+          APPLY_CHANGES: ${{ github.event_name == 'schedule' && vars.WBFC_EQUIPMENT_ENABLED == 'true' || github.event_name == 'workflow_dispatch' && inputs.apply_changes == 'true' }}
+        run: node equipment-rentals/run.mjs
