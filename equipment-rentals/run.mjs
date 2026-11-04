@@ -10,22 +10,24 @@ const C = {
  override:'date_mm8s5zr6', approval:'color_mm8sa7ck', revised:'date_mm8spnfh',
  recipients:'multiple_person_mm8sa52', lastEsc:'date_mm8s4vdm',
  lastAnn:'date_mm8s4aqz', attention:'color_mm8sn79f',
- daily:'numeric_mm8s9ahy'
+ daily:'numeric_mm8s9ahy', weekly:'numeric_mm8s7rx7', monthly:'numeric_mm8sxpy1',
+ tierAlertKey:'text_mm8s51qc', tierOverrun:'numeric_mm8s6bm3'
 };
 if (!TOKEN) throw Error('MONDAY_API_TOKEN secret is required');
-const today = new Intl.DateTimeFormat('en-CA',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+const parts = new Intl.DateTimeFormat('en-US',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
+const part = type => parts.find(p=>p.type===type).value;
+const today = part('year')+'-'+part('month')+'-'+part('day');
 const date = x => x?.date || null;
 const days = (a,b) => Math.round((Date.parse(a+'T12:00:00Z')-Date.parse(b+'T12:00:00Z'))/86400000);
-function anniversary(start,n) {
-  const [y,m,d]=start.split('-').map(Number), t=new Date(Date.UTC(y,m-1+n,1));
-  const end=new Date(Date.UTC(t.getUTCFullYear(),t.getUTCMonth()+1,0)).getUTCDate();
-  return [t.getUTCFullYear(),String(t.getUTCMonth()+1).padStart(2,'0'),String(Math.min(d,end)).padStart(2,'0')].join('-');
-}
-function nextAnniversary(start,asOf) {
-  if(!start) return null;
-  let n=1, a=anniversary(start,n);
-  while(a<asOf && n<1200) a=anniversary(start,++n);
-  return a;
+const addDays = (d,n) => new Date(Date.parse(d+'T12:00:00Z')+n*86400000).toISOString().slice(0,10);
+const nextAnniversary = (start,asOf) => addDays(start,Math.max(1,Math.ceil(Math.max(1,days(asOf,start))/28))*28);
+const money = (cols,id) => Number(cols[id]?.text?.replace(/[^0-9.-]/g,'')||0);
+// Each 28-day period is billed at its highest attained tier; replacement, not addition.
+function tierCost(length,r) {
+ if(length<=0)return 0;
+ const full=Math.floor(length/28), remainder=length%28;
+ const partial=n=>n<=0?0:n<=2?n*r.daily:n<=9?r.weekly:r.monthly;
+ return full*r.monthly+partial(remainder);
 }
 async function gql(query,variables={}) {
   const res=await fetch('https://api.monday.com/v2',{method:'POST',headers:{Authorization:TOKEN,'Content-Type':'application/json','API-Version':'2025-10'},body:JSON.stringify({query,variables})});
@@ -66,9 +68,12 @@ async function run() {
   const target=(approved && date(val(c,C.revised)))||date(val(c,C.planned));
   const over=target?Math.max(0,days(today,target)):0;
   const override=date(val(c,C.override));
-  const next=override||nextAnniversary(start,today);
+  const next=override ? (override>=today?override:addDays(override,Math.ceil(days(today,override)/28)*28)) : nextAnniversary(start,today);
   const old=date(val(c,C.anniversary));
   const updates={};
+  const rates={daily:money(c,C.daily),weekly:money(c,C.weekly),monthly:money(c,C.monthly)};
+  const estimatedOverrun=tierCost(over,rates);
+  if(Number(c[C.tierOverrun]?.text||0)!==estimatedOverrun)updates[C.tierOverrun]=estimatedOverrun;
   // Preserve the current anniversary through its +1 day native alert.
   if(next && (!old || days(today,old)>1) && old!==next)updates[C.anniversary]={date:next};
   let attention='On Track';
@@ -79,9 +84,30 @@ async function run() {
   const lastEsc=date(val(c,C.lastEsc));
   // 3 days after approved plan and every 3 days thereafter.
   if(status==='On Rent' && !called && !end && over>=3 && (!lastEsc||days(today,lastEsc)>=3)){
-   const rate=Number(c[C.daily]?.text?.replace(/[^0-9.-]/g,'')||0);
-   const message=`Equipment rental over plan: ${item.name}. ${over} days beyond approved end ${target}. Estimated daily-rate overrun: $${(over*rate).toFixed(2)}. Call off or approve extension.`;
+
+   const message=`Equipment rental over plan: ${item.name}. ${over} days beyond approved end ${target}. Estimated tiered overrun (rate replacement): ${estimatedOverrun.toFixed(2)}. Call off or approve extension.`;
    if(await notify(item,c,message))updates[C.lastEsc]={date:today};
+  }
+  // Alert only on the exact transition day; persist a key to avoid duplicates on reruns.
+  // Rental day 1 is the start date; day 3 is elapsed day 2, day 10 is elapsed day 9.
+  const elapsed=days(today,start);
+  if(status==='On Rent' && !called && !end && elapsed>=0) {
+    const cycle=Math.floor(elapsed/28), dayInCycle=elapsed%28+1;
+    const tier=dayInCycle===3?'Weekly':dayInCycle===10?'Monthly':null;
+    const key=tier ? addDays(start,cycle*28)+':'+tier : null;
+    const lastKey=label(c,C.tierAlertKey);
+    if(key && key!==lastKey) {
+      const msg='Equipment rental rate transition: '+item.name+'. Day '+dayInCycle+
+        ' of 28-day cycle starting '+addDays(start,cycle*28)+'. '+tier+
+        ' rate now applies (
+ }
+ console.log(JSON.stringify({today,items:items.length,activeProcessed:processed,apply:APPLY}));
+}
+run().catch(e=>{console.error(e);process.exitCode=1});
++rates[tier.toLowerCase()].toFixed(2)+
+        '), replacing the previous tier. Review call-off timing and rental cost.';
+      if(await notify(item,c,msg))updates[C.tierAlertKey]=key;
+    }
   }
   await update(item.id,updates);
  }
