@@ -46,7 +46,7 @@ async function notify(item,cols,message) {
  if(!ids.length){console.log('No assigned recipients',item.name);return false}
  for(const userId of ids) {
    if(!APPLY){console.log('DRY RUN notify',userId,item.name,message);continue}
-   await gql('mutation($u:ID!,$t:ID!,$m:String!){create_notification(user_id:$u,target_id:$t,text:$m){text}}',{u:userId,t:item.id,m:message});
+   await gql('mutation($u:ID!,$t:ID!,$m:String!){create_notification(user_id:$u,target_id:$t,text:$m,target_type:Project){text}}',{u:userId,t:item.id,m:message});
  }
  return true;
 }
