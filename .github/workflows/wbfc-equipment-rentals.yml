@@ -21,6 +21,8 @@ jobs:
           node-version: '22'
       - name: Validate JavaScript syntax
         run: node --check equipment-rentals/run.mjs
+      - name: Test billing tiers and transitions
+        run: node --test equipment-rentals/billing.test.mjs
       - name: Check equipment rentals
         env:
           MONDAY_API_TOKEN: ${{ secrets.MONDAY_API_TOKEN }}
