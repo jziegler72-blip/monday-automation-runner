@@ -75,7 +75,11 @@ async function run() {
   const estimatedOverrun=tierCost(over,rates);
   if(Number(c[C.tierOverrun]?.text||0)!==estimatedOverrun)updates[C.tierOverrun]=estimatedOverrun;
   // Preserve the current anniversary through its +1 day native alert.
-  if(next && (!old || days(today,old)>1) && old!==next)updates[C.anniversary]={date:next};
+  // Migrate old calendar-month dates immediately if not on the 28-day schedule.
+  // Keep a valid anniversary through its +1-day native reminder.
+  const anchor=override||start;
+  const aligned=old && days(old,anchor)>=28 && days(old,anchor)%28===0;
+  if(next && old!==next && (!aligned || days(today,old)>1))updates[C.anniversary]={date:next};
   let attention='On Track';
   if(status==='Call-Off Requested' && !end)attention='Awaiting Billing Closure';
   else if(over>0 && !end)attention='Over Plan';
