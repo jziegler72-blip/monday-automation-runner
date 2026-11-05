@@ -18,17 +18,8 @@ const parts = new Intl.DateTimeFormat('en-US',{timeZone:TZ,year:'numeric',month:
 const part = type => parts.find(p=>p.type===type).value;
 const today = part('year')+'-'+part('month')+'-'+part('day');
 const date = x => x?.date || null;
-const days = (a,b) => Math.round((Date.parse(a+'T12:00:00Z')-Date.parse(b+'T12:00:00Z'))/86400000);
-const addDays = (d,n) => new Date(Date.parse(d+'T12:00:00Z')+n*86400000).toISOString().slice(0,10);
-const nextAnniversary = (start,asOf) => addDays(start,Math.max(1,Math.ceil(Math.max(1,days(asOf,start))/28))*28);
+import { days, addDays, nextAnniversary, tierCost, transitionFor } from './billing.mjs';
 const money = (cols,id) => Number(cols[id]?.text?.replace(/[^0-9.-]/g,'')||0);
-// Each 28-day period is billed at its highest attained tier; replacement, not addition.
-function tierCost(length,r) {
- if(length<=0)return 0;
- const full=Math.floor(length/28), remainder=length%28;
- const partial=n=>n<=0?0:n<=2?n*r.daily:n<=9?r.weekly:r.monthly;
- return full*r.monthly+partial(remainder);
-}
 async function gql(query,variables={}) {
   const res=await fetch('https://api.monday.com/v2',{method:'POST',headers:{Authorization:TOKEN,'Content-Type':'application/json','API-Version':'2025-10'},body:JSON.stringify({query,variables})});
   const body=await res.json();if(!res.ok||body.errors?.length) throw Error(JSON.stringify(body.errors||body));
@@ -94,15 +85,13 @@ async function run() {
   }
   // Alert only on the exact transition day; persist a key to avoid duplicates on reruns.
   // Rental day 1 is the start date; day 3 is elapsed day 2, day 10 is elapsed day 9.
-  const elapsed=days(today,start);
-  if(status==='On Rent' && !called && !end && elapsed>=0) {
-    const cycle=Math.floor(elapsed/28), dayInCycle=elapsed%28+1;
-    const tier=dayInCycle===3?'Weekly':dayInCycle===10?'Monthly':null;
-    const key=tier ? addDays(start,cycle*28)+':'+tier : null;
+  const transition=status==='On Rent' && !called && !end ? transitionFor(start,today) : null;
+  if(transition) {
+    const {cycleStart,dayInCycle,tier,key}=transition;
     const lastKey=label(c,C.tierAlertKey);
-    if(key && key!==lastKey) {
+    if(key!==lastKey) {
       const msg='Equipment rental rate transition: '+item.name+'. Day '+dayInCycle+
-        ' of 28-day cycle starting '+addDays(start,cycle*28)+'. '+tier+
+        ' of 28-day cycle starting '+cycleStart+'. '+tier+
         ' rate now applies ($'+rates[tier.toLowerCase()].toFixed(2)+
         '), replacing the previous tier. Review call-off timing and rental cost.';
       if(await notify(item,c,msg))updates[C.tierAlertKey]=key;
