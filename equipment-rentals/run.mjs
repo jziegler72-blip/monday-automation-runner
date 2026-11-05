@@ -103,12 +103,7 @@ async function run() {
     if(key && key!==lastKey) {
       const msg='Equipment rental rate transition: '+item.name+'. Day '+dayInCycle+
         ' of 28-day cycle starting '+addDays(start,cycle*28)+'. '+tier+
-        ' rate now applies (
- }
- console.log(JSON.stringify({today,items:items.length,activeProcessed:processed,apply:APPLY}));
-}
-run().catch(e=>{console.error(e);process.exitCode=1});
-+rates[tier.toLowerCase()].toFixed(2)+
+        ' rate now applies ($'+rates[tier.toLowerCase()].toFixed(2)+
         '), replacing the previous tier. Review call-off timing and rental cost.';
       if(await notify(item,c,msg))updates[C.tierAlertKey]=key;
     }
