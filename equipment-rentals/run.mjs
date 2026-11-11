@@ -12,7 +12,7 @@ const C = {
  recipients:'multiple_person_mm8sa52', lastEsc:'date_mm8s4vdm',
  lastAnn:'date_mm8s4aqz', attention:'color_mm8sn79f',
  daily:'numeric_mm8s9ahy', weekly:'numeric_mm8s7rx7', monthly:'numeric_mm8sxpy1',
- tierAlertKey:'text_mm8s51qc', tierOverrun:'numeric_mm8s6bm3'
+ tierAlertKey:'text_mm8s51qc', tierOverrun:'numeric_mm8s6bm3', tierTotal:'numeric_mm90400k'
 };
 if (!TOKEN) throw Error('MONDAY_API_TOKEN secret is required');
 const parts = new Intl.DateTimeFormat('en-US',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
@@ -65,6 +65,9 @@ async function run() {
   const old=date(val(c,C.anniversary));
   const updates={};
   const rates={daily:money(c,C.daily),weekly:money(c,C.weekly),monthly:money(c,C.monthly)};
+  const elapsedDays=Math.max(0,days(end||today,start)+1);
+  const estimatedTotal=tierCost(elapsedDays,rates);
+  if(Number(c[C.tierTotal]?.text||0)!==estimatedTotal)updates[C.tierTotal]=estimatedTotal;
   const estimatedOverrun=tierCost(over,rates);
   if(Number(c[C.tierOverrun]?.text||0)!==estimatedOverrun)updates[C.tierOverrun]=estimatedOverrun;
   // Preserve the current anniversary through its +1 day native alert.
