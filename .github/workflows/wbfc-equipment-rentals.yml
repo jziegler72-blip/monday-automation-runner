@@ -4,6 +4,10 @@ on:
     - cron: '15 14 * * *'
   workflow_dispatch:
     inputs:
+      test_item_ids:
+        description: 'Optional comma-separated item IDs to process (controlled testing only)'
+        required: false
+        default: ''
       apply_changes:
         description: 'Write updates and send notifications (true/false)'
         required: true
@@ -27,5 +31,6 @@ jobs:
         env:
           MONDAY_API_TOKEN: ${{ secrets.MONDAY_API_TOKEN }}
           MONDAY_EQUIPMENT_BOARD_ID: '18438455065'
+          WBFC_TEST_ITEM_IDS: ${{ github.event_name == 'workflow_dispatch' && inputs.test_item_ids || '' }}
           APPLY_CHANGES: ${{ github.event_name == 'schedule' && vars.WBFC_EQUIPMENT_ENABLED == 'true' || github.event_name == 'workflow_dispatch' && inputs.apply_changes == 'true' }}
         run: node equipment-rentals/run.mjs

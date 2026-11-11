@@ -3,6 +3,7 @@
 const BOARD = process.env.MONDAY_EQUIPMENT_BOARD_ID || '18438455065';
 const TOKEN = process.env.MONDAY_API_TOKEN;
 const APPLY = process.env.APPLY_CHANGES === 'true';
+const ONLY_IDS = new Set((process.env.WBFC_TEST_ITEM_IDS||'').split(',').map(x=>x.trim()).filter(Boolean));
 const TZ = 'America/Chicago';
 const C = {
  status:'color_mm8spz8j', start:'date_mm8sq443', planned:'date_mm8s2eh4',
@@ -51,6 +52,7 @@ async function run() {
  }while(cursor);
  let processed=0;
  for(const item of items){
+  if(ONLY_IDS.size && !ONLY_IDS.has(String(item.id)))continue;
   const c=columns(item),status=label(c,C.status),start=date(val(c,C.start));
   if(!start || !['On Rent','Call-Off Requested'].includes(status))continue;
   processed++;
